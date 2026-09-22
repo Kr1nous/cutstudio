@@ -24,7 +24,22 @@ export function playbackPath(asset: MediaAsset): string {
 }
 
 export type FilterName = 'none' | 'vivid' | 'cinema' | 'bw' | 'vintage'
-export type TransitionType = 'none' | 'cross_dissolve' | 'fade_black' | 'fade_white' | 'push'
+export type TransitionType =
+  | 'none'
+  | 'cross_dissolve'
+  | 'dissolve'
+  | 'fade_black'
+  | 'fade_white'
+  | 'dip_black'
+  | 'push'
+  | 'slide_left'
+  | 'smooth_wipe'
+  | 'wipe_up'
+  | 'cover'
+  | 'reveal'
+  | 'zoom'
+  | 'iris'
+  | 'blur_mix'
 export type EffectType = 'blur' | 'radial_blur' | 'glow' | 'grain' | 'mosaic' | 'lut'
 
 export interface ClipEffect {
@@ -158,6 +173,8 @@ export interface ClipFx {
   key?: ClipKey | null
   audioLink?: ClipAudioLink | null
   denoise?: ClipDenoise | null
+  /** 人声增强预设（voice_enhance，只在导出链路生效）。 */
+  voice?: { preset: 'podcast' | 'clear' | 'warm' } | null
 }
 
 export const DEFAULT_CLIP_FX: ClipFx = {
@@ -200,13 +217,28 @@ export interface TimelineClip {
   text?: TextStyle
   shape?: ShapeStyle
   textAnim?: TextPreset
+  /** 音频轨片段的用途：music 会被闪避；dialog（J/L cut 的对白）不闪避、不会被 set_music 清掉。 */
+  role?: 'music' | 'dialog'
 }
 
 export interface SubtitleStyle {
+  /** 上次 captions_from_transcript 用的每行字数 / 行数；删改内容后自动重建字幕时沿用。 */
+  maxChars?: number
+  maxLines?: 1 | 2
   fontSize: number
   color: string
   stroke: string
   position: 'bottom' | 'top' | 'center'
+  /** clean = 描边；boxed = 半透明底框；karaoke = 逐词高亮；keyword = 关键词变色放大。 */
+  preset?: 'clean' | 'boxed' | 'karaoke' | 'keyword'
+  /** karaoke 已读词 / keyword 关键词颜色。 */
+  highlightColor?: string
+  /** boxed 底框颜色。 */
+  boxColor?: string
+  /** boxed 底框不透明度 0–1。 */
+  boxOpacity?: number
+  /** keyword 预设要高亮的词。 */
+  keywords?: string[]
 }
 
 export const DEFAULT_SUBTITLE_STYLE: SubtitleStyle = {
@@ -222,6 +254,8 @@ export interface SubtitleCue {
   endMs: number
   text: string
   source: ClipSource
+  /** 词级时间（时间线时间），用于卡拉 OK 逐词高亮。 */
+  words?: { text: string; startMs: number; endMs: number }[]
 }
 
 export interface TimeRange {
@@ -233,6 +267,21 @@ export interface TranscriptCue {
   startMs: number
   endMs: number
   text: string
+  /** 来源素材；有它时 startMs/endMs/words 均为该素材的源时间。 */
+  assetId?: string
+  /** 词级时间戳（素材源时间）。中文按字/词粒度。 */
+  /** p：语音识别置信度 0–1（whisper token 概率的最小值），低的可能是错别字。 */
+  words?: { text: string; startMs: number; endMs: number; p?: number }[]
+  /** 词时间对齐算法版本（shared/wordalign TRANSCRIPT_ALIGN_VERSION）；低于当前版本时后台用能量索引重新对齐。 */
+  alignVersion?: number
+}
+
+/** 细粒度停顿（给词对齐 / 字幕断句用，不用于剪辑删除）。 */
+export interface PauseRange extends TimeRange {
+  /** 相对局部语音电平下降的 dB。 */
+  depthDb: number
+  /** true = 短能量谷（< 60ms 或下降不够深），只作为弱边界候选。 */
+  valley?: boolean
 }
 
 export interface AssetIndex {
@@ -242,6 +291,28 @@ export interface AssetIndex {
   peakRms: number
   /** 0–1 峰值，整段素材。 */
   waveform?: number[]
+  /** 细粒度停顿：≥60ms 且比局部语音低 ≥12dB 的下陷，以及更短的能量谷（valley）。 */
+  pauses?: PauseRange[]
+  /** 分析版本；2 = 10ms 帧自适应静音检测；3 = 细粒度停顿 + 数字静音不参与噪底估计。 */
+  version?: number
+  /** 镜头检测是否已跑过（scenes 为空时区分“没切点”和“没分析”）。 */
+  scenesDetected?: boolean
+  /** Onset/节拍位置（毫秒，素材源时间）。 */
+  beats?: number[]
+  bpm?: number
+  /** EBU R128 integrated loudness。 */
+  lufs?: number
+  /** True peak，dBTP。 */
+  truePeak?: number
+  /** Loudness range，LU。 */
+  lra?: number
+  /** 后台分析（旧索引升级 + 镜头检测）状态。 */
+  analysis?: 'pending' | 'done' | 'error'
+  /** 语音转写状态：unavailable = 本机无 whisper 且未允许/无法云端转写；no_speech = 没检测到人声。 */
+  transcription?: 'pending' | 'done' | 'unavailable' | 'no_speech' | 'error'
+  /** 自适应阈值所用噪底 / 语音电平（dBFS）。 */
+  noiseFloorDb?: number
+  speechLevelDb?: number
 }
 
 export interface Timeline {
@@ -295,6 +366,8 @@ export interface TimelineMarker {
   id: string
   atMs: number
   label: string
+  /** chapter = 章节（set_chapters / title_card chapter）；不填为普通标记。 */
+  kind?: 'chapter'
 }
 
 export interface Project {
@@ -307,6 +380,8 @@ export interface Project {
   assets: MediaAsset[]
   timeline: Timeline
   transcript: TranscriptCue[]
+  /** 工程热词（人名、产品名、术语）：转写时作为 whisper 提示词，减少错字。 */
+  vocabulary?: string[]
   markers: TimelineMarker[]
   snapshots: ProjectSnapshot[]
   review: ReviewAction[]
@@ -328,6 +403,8 @@ export interface AiProvider {
 export interface AppSettings {
   activeProviderId: string
   allowMediaUpload: boolean
+  /** 本机没有 whisper.cpp 时，是否把素材音频上传到 AI 提供方做云端转写。默认关闭。 */
+  allowCloudTranscription?: boolean
   mcpPort: number
   firstRunComplete: boolean
   lastProjectPath?: string
@@ -365,7 +442,7 @@ export type TimelineOp =
       shape?: ShapeStyle
       textAnim?: TextPreset
     }
-  | { op: 'add_audio'; assetId: string; startMs?: number; volume?: number }
+  | { op: 'add_audio'; assetId: string; startMs?: number; volume?: number; inMs?: number; outMs?: number; fx?: Partial<ClipFx>; role?: 'music' | 'dialog' }
   | { op: 'delete_asset'; assetId: string }
 
 export interface McpStatus {
@@ -377,6 +454,7 @@ export interface McpStatus {
 export const DEFAULT_SETTINGS: AppSettings = {
   activeProviderId: 'spacexai',
   allowMediaUpload: true,
+  allowCloudTranscription: false,
   mcpPort: 4877,
   firstRunComplete: false,
   providers: [
@@ -404,7 +482,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
       kind: 'anthropic',
       baseUrl: 'https://api.anthropic.com',
       apiKey: '',
-      model: 'claude-sonnet-4-5',
+      model: 'claude-sonnet-5',
       enabled: true
     },
     {
@@ -442,6 +520,8 @@ export interface ActionResult {
   summary: string
   changedIds: string[]
   durationMs: number
+  /** 给 AI 的提醒：可能剪坏的地方、被忽略的参数等。 */
+  warnings?: string[]
 }
 
 export function emptyTimeline(): Timeline {

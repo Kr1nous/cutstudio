@@ -4,6 +4,8 @@ import { id, nowIso } from '../shared/ids'
 import { applySourceFrame, packStorylineClips, shouldAdoptSourceFrame } from '../shared/compose'
 import { probeMedia, writeThumb } from './render/ffmpeg'
 import { analyzeMediaFile } from './render/wave'
+import { queueAssetAnalysis } from './analysis/background'
+import { writeAgentDocs } from './agentdocs'
 import {
   type AppSettings,
   type MediaAsset,
@@ -14,6 +16,7 @@ import {
   type Timeline,
   type TimelineClip,
   type TimelineOp,
+  DEFAULT_CLIP_FX,
   DEFAULT_PROJECT_SETTINGS,
   DEFAULT_SETTINGS,
   DEFAULT_SUBTITLE_STYLE,
@@ -24,6 +27,9 @@ import {
 
 const UNDO_LIMIT = 80
 
+/** transcript 只在会改转写的操作（pushUndo(label, { transcript: true })）里保存，避免撤销剪辑时连带回退后台的转写重新对齐。 */
+type UndoEntry = { timeline: Timeline; transcript?: Project['transcript']; label?: string }
+
 export type EditorState = ReturnType<ProjectStore['getState']>
 type StateListener = (state: EditorState) => void
 
@@ -32,8 +38,8 @@ export class ProjectStore {
   projectPath: string | null = null
   settings: AppSettings = structuredClone(DEFAULT_SETTINGS)
   settingsPath = ''
-  private undo: Timeline[] = []
-  private redo: Timeline[] = []
+  private undo: UndoEntry[] = []
+  private redo: UndoEntry[] = []
   private listeners = new Set<StateListener>()
 
   onChange(fn: StateListener): () => void {
@@ -101,6 +107,7 @@ export class ProjectStore {
   async updateSettings(patch: Partial<AppSettings> & { providers?: AppSettings['providers'] }): Promise<void> {
     if (patch.activeProviderId) this.settings.activeProviderId = patch.activeProviderId
     if (typeof patch.allowMediaUpload === 'boolean') this.settings.allowMediaUpload = patch.allowMediaUpload
+    if (typeof patch.allowCloudTranscription === 'boolean') this.settings.allowCloudTranscription = patch.allowCloudTranscription
     if (typeof patch.mcpPort === 'number') this.settings.mcpPort = patch.mcpPort
     if (typeof patch.firstRunComplete === 'boolean') this.settings.firstRunComplete = patch.firstRunComplete
     if (patch.providers) {
@@ -155,6 +162,7 @@ export class ProjectStore {
     this.settings.lastProjectPath = folder
     await this.saveSettings()
     await this.save()
+    this.writeAgentDocs()
     this.broadcast()
   }
 
@@ -166,7 +174,22 @@ export class ProjectStore {
     this.redo = []
     this.settings.lastProjectPath = folder
     await this.saveSettings()
+    this.writeAgentDocs()
     this.broadcast()
+    // 旧索引升级、转写重新对齐等在后台补齐
+    queueAssetAnalysis(
+      this,
+      this.project.assets.filter((a) => a.kind === 'video' || a.kind === 'audio').map((a) => a.id)
+    )
+  }
+
+  /** 工程目录里写给终端 AI agent 的说明文件（CLAUDE.md / AGENTS.md / GEMINI.md / skill）。失败不影响工程。 */
+  private writeAgentDocs(): void {
+    try {
+      writeAgentDocs(this.projectPath)
+    } catch {
+      /* ignore */
+    }
   }
 
   async save(): Promise<void> {
@@ -180,27 +203,78 @@ export class ProjectStore {
     return this.project
   }
 
-  pushUndo(): void {
+  pushUndo(label?: string, opts: { transcript?: boolean } = {}): void {
     if (!this.project) return
-    this.undo.push(structuredClone(this.project.timeline))
+    this.undo.push(this.entry(label, opts.transcript))
     if (this.undo.length > UNDO_LIMIT) this.undo.shift()
     this.redo = []
   }
 
-  async undoLast(): Promise<void> {
-    if (!this.project || this.undo.length === 0) return
-    this.redo.push(structuredClone(this.project.timeline))
-    this.project.timeline = this.undo.pop()!
-    await this.save()
-    this.broadcast()
+  /** 撤销点：时间线深拷贝；转写按引用保存（转写只会整体替换，不会原地改）。 */
+  private entry(label?: string, withTranscript = false): UndoEntry {
+    const p = this.requireProject()
+    return { timeline: structuredClone(p.timeline), ...(withTranscript ? { transcript: p.transcript } : {}), label }
   }
 
-  async redoLast(): Promise<void> {
-    if (!this.project || this.redo.length === 0) return
-    this.undo.push(structuredClone(this.project.timeline))
-    this.project.timeline = this.redo.pop()!
+  private restore(e: UndoEntry): void {
+    const p = this.requireProject()
+    p.timeline = e.timeline
+    if (e.transcript) p.transcript = e.transcript
+  }
+
+  /** 把 fn 里多次改动合并成一次撤销、一条审查记录、至多一个版本快照。 */
+  async batch<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    const project = this.requireProject()
+    const undoLen = this.undo.length
+    const reviewLen = project.review.length
+    const snapLen = project.snapshots.length
+    const out = await fn()
+    if (this.undo.length > undoLen + 1) {
+      // 合并时保留最早的撤销点；中途有改转写的撤销点时，把转写一起带上
+      const merged = this.undo.splice(undoLen + 1)
+      const withTranscript = merged.find((x) => x.transcript)
+      if (withTranscript && !this.undo[undoLen]!.transcript) this.undo[undoLen]!.transcript = withTranscript.transcript
+    }
+    if (this.undo.length === undoLen + 1) this.undo[undoLen]!.label = label
+    const added = project.review.length - reviewLen
+    if (added > 1) {
+      const [first] = project.review.splice(0, added)
+      project.review.unshift({ ...first, summary: label })
+    }
+    if (project.snapshots.length > snapLen + 1) {
+      const last = project.snapshots.splice(snapLen).at(-1)!
+      project.snapshots.push({ ...last, label })
+    }
     await this.save()
     this.broadcast()
+    return out
+  }
+
+  /** 撤销上一步，返回被撤销那一步的说明（没有可撤销的返回 null）。 */
+  async undoLast(): Promise<{ label: string } | null> {
+    if (!this.project || this.undo.length === 0) return null
+    const e = this.undo.pop()!
+    this.redo.push(this.entry(e.label, Boolean(e.transcript)))
+    this.restore(e)
+    await this.save()
+    this.broadcast()
+    return { label: e.label ?? '上一步改动' }
+  }
+
+  async redoLast(): Promise<{ label: string } | null> {
+    if (!this.project || this.redo.length === 0) return null
+    const e = this.redo.pop()!
+    this.undo.push(this.entry(e.label, Boolean(e.transcript)))
+    this.restore(e)
+    await this.save()
+    this.broadcast()
+    return { label: e.label ?? '上一步改动' }
+  }
+
+  /** 下一次 undo 会撤掉什么。 */
+  undoPreview(): string | null {
+    const e = this.undo.at(-1)
+    return e ? e.label ?? '上一步改动' : null
   }
 
   snapshot(label: string): void {
@@ -227,6 +301,8 @@ export class ProjectStore {
 
   log(partial: Omit<ReviewAction, 'id' | 'at' | 'reversible'> & { reversible?: boolean }): void {
     const project = this.requireProject()
+    const top = this.undo.at(-1)
+    if (top && top.label == null) top.label = partial.summary
     project.review.unshift({
       id: id('act'),
       at: nowIso(),
@@ -268,7 +344,8 @@ export class ProjectStore {
       }
       if (kind === 'video' || kind === 'audio') {
         try {
-          asset.index = await analyzeMediaFile(dest, asset.durationMs)
+          // 短素材顺便做镜头检测；长素材的镜头检测和转写交给后台队列，不阻塞导入
+          asset.index = await analyzeMediaFile(dest, asset.durationMs, { scenes: asset.durationMs <= 120_000 })
         } catch {
           /* waveform is best-effort */
         }
@@ -288,6 +365,10 @@ export class ProjectStore {
     })
     await this.save()
     this.broadcast()
+    queueAssetAnalysis(
+      this,
+      imported.filter((a) => a.kind === 'video' || a.kind === 'audio').map((a) => a.id)
+    )
     return imported
   }
 
@@ -387,8 +468,10 @@ export class ProjectStore {
         durationMs: a.durationMs,
         width: a.width,
         height: a.height,
-        proxy: Boolean(a.proxyPath)
+        proxy: Boolean(a.proxyPath),
+        analyzed: Boolean(a.index)
       })),
+      transcriptReady: project.transcript.some((t) => t.text.trim()),
       renderQueue: (project.renderQueue ?? []).map((j) => ({
         id: j.id,
         preset: j.preset,
@@ -404,7 +487,7 @@ export class ProjectStore {
         inMs: c.inMs,
         outMs: c.outMs,
         volume: c.volume,
-        fx: c.fx
+        fx: fxDiff(c.fx)
       })),
       layers: project.timeline.overlays.map((c) => ({
         id: c.id,
@@ -418,7 +501,7 @@ export class ProjectStore {
         text: c.text?.text,
         shape: c.shape?.shape,
         textAnim: c.textAnim,
-        fx: c.fx
+        fx: fxDiff(c.fx)
       })),
       subtitles: project.timeline.subtitles
     }
@@ -426,6 +509,21 @@ export class ProjectStore {
 }
 
 export const store = new ProjectStore()
+
+/** 只保留和默认值不同的效果字段，给 AI 看的项目摘要不被一堆默认值淹没。 */
+function fxDiff(fx: TimelineClip['fx']): Record<string, unknown> | undefined {
+  if (!fx) return undefined
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(fx)) {
+    if (value === undefined) continue
+    const def = (DEFAULT_CLIP_FX as unknown as Record<string, unknown>)[key]
+    if (def !== undefined && JSON.stringify(def) === JSON.stringify(value)) continue
+    if (Array.isArray(value) && !value.length) continue
+    if (value && typeof value === 'object' && !Array.isArray(value) && !Object.keys(value).length) continue
+    out[key] = value
+  }
+  return Object.keys(out).length ? out : undefined
+}
 
 function sanitize(name: string): string {
   return name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'untitled'
@@ -720,17 +818,21 @@ function applyOp(project: Project, op: TimelineOp, clipSource: TimelineClip['sou
     case 'add_audio': {
       const asset = project.assets.find((a) => a.id === op.assetId)
       if (!asset) throw new Error(`素材不存在: ${op.assetId}`)
-      const dur = Math.max(asset.durationMs, timelineDurationMs(tl) || asset.durationMs)
+      const ranged = op.inMs != null || op.outMs != null
+      const inMs = Math.max(0, op.inMs ?? 0)
+      const outMs = Math.min(asset.durationMs || Infinity, op.outMs ?? asset.durationMs)
+      const dur = ranged ? Math.max(1, outMs - inMs) : Math.max(asset.durationMs, timelineDurationMs(tl) || asset.durationMs)
       tl.audio.push({
         id: id('clip'),
         assetId: asset.id,
         startMs: op.startMs ?? 0,
         durationMs: dur,
-        inMs: 0,
-        outMs: asset.durationMs,
+        inMs,
+        outMs: ranged ? outMs : asset.durationMs,
         volume: op.volume ?? 0.35,
         source: clipSource,
-        fx: {}
+        fx: { ...op.fx },
+        role: op.role ?? 'music'
       })
       break
     }

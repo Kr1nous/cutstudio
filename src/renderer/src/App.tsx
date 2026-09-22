@@ -356,7 +356,7 @@ export default function App() {
         <SettingsModal
           settings={state.settings}
           onClose={() => setSettingsOpen(false)}
-          onSave={() => undefined}
+          onSave={(patch) => void window.cut.updateSettings(patch)}
         />
       ) : null}
       {!state.settings.firstRunComplete ? (

@@ -7,6 +7,8 @@ export interface ChatMessage {
   name?: string
   tool_call_id?: string
   tool_calls?: ToolCall[]
+  /** user 消息附带的图片，或 tool 结果里的图片（get_frame / contact_sheet）。 */
+  images?: { mime: string; data: string }[]
 }
 
 export interface ToolSpec {
@@ -52,17 +54,26 @@ async function chatOpenAiCompatible(
     baseURL: provider.baseUrl
   })
 
-  const oaMessages = messages.map((m, idx) => {
-    if (m.role === 'user' && idx === lastUserIndex(messages) && images.length > 0) {
+  const imageParts = (list: { mime: string; data: string }[]) =>
+    list.map((img) => ({ type: 'image_url' as const, image_url: { url: `data:${img.mime};base64,${img.data}` } }))
+  // OpenAI 的 tool 消息不能带图：同一轮 tool 结果之后补一条 user 消息放图片。
+  const withToolImages: ChatMessage[] = []
+  let pending: { mime: string; data: string }[] = []
+  messages.forEach((m, i) => {
+    withToolImages.push(m.role === 'tool' ? { ...m, images: undefined } : m)
+    if (m.role === 'tool' && m.images?.length) pending.push(...m.images)
+    if (pending.length && messages[i + 1]?.role !== 'tool') {
+      withToolImages.push({ role: 'user', content: '上面工具返回的画面：', images: pending })
+      pending = []
+    }
+  })
+
+  const oaMessages = withToolImages.map((m, idx) => {
+    const attach = [...(m.images ?? []), ...(m.role === 'user' && idx === lastUserIndex(withToolImages) ? images : [])]
+    if (m.role === 'user' && attach.length > 0) {
       return {
         role: 'user' as const,
-        content: [
-          { type: 'text' as const, text: m.content },
-          ...images.map((img) => ({
-            type: 'image_url' as const,
-            image_url: { url: `data:${img.mime};base64,${img.data}` }
-          }))
-        ]
+        content: [{ type: 'text' as const, text: m.content }, ...imageParts(attach)]
       }
     }
     if (m.role === 'tool') {
@@ -97,12 +108,9 @@ async function chatOpenAiCompatible(
   })
 
   const msg = response.choices[0]?.message
-  const toolCalls: ToolCall[] =
-    msg?.tool_calls?.map((c) => ({
-      id: c.id,
-      name: c.function.name,
-      arguments: c.function.arguments
-    })) ?? []
+  const toolCalls: ToolCall[] = (msg?.tool_calls ?? []).flatMap((c) =>
+    c.type === 'function' ? [{ id: c.id, name: c.function.name, arguments: c.function.arguments }] : []
+  )
 
   return { text: msg?.content ?? '', toolCalls }
 }
@@ -115,28 +123,45 @@ async function chatAnthropic(
 ): Promise<ChatResult> {
   const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n')
   const rest = messages.filter((m) => m.role !== 'system')
-  const anthMessages = []
-  for (const m of rest) {
-    if (m.role === 'tool') {
-      anthMessages.push({
-        role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: m.content }]
-      })
-    } else if (m.role === 'assistant') {
-      anthMessages.push({ role: 'assistant', content: m.content })
-    } else {
-      const content: unknown[] = [{ type: 'text', text: m.content }]
-      if (m === rest[rest.length - 1] && images.length) {
-        for (const img of images) {
-          content.push({
-            type: 'image',
-            source: { type: 'base64', media_type: img.mime, data: img.data }
-          })
-        }
-      }
-      anthMessages.push({ role: 'user', content })
-    }
+  type Block = Record<string, unknown>
+  const anthMessages: { role: 'user' | 'assistant'; content: Block[] }[] = []
+  const push = (role: 'user' | 'assistant', blocks: Block[]) => {
+    const prev = anthMessages.at(-1)
+    // Anthropic 要求 user / assistant 交替：同一方向的连续消息合并（多个 tool_result 必须在同一条 user 消息里）。
+    if (prev?.role === role) prev.content.push(...blocks)
+    else anthMessages.push({ role, content: blocks })
   }
+  const lastUser = rest.map((m) => m.role).lastIndexOf('user')
+  rest.forEach((m, idx) => {
+    if (m.role === 'tool') {
+      const content = m.images?.length
+        ? [
+            { type: 'text', text: m.content },
+            ...m.images.map((img) => ({ type: 'image', source: { type: 'base64', media_type: img.mime, data: img.data } }))
+          ]
+        : m.content
+      push('user', [{ type: 'tool_result', tool_use_id: m.tool_call_id, content }])
+    } else if (m.role === 'assistant') {
+      const blocks: Block[] = []
+      if (m.content) blocks.push({ type: 'text', text: m.content })
+      for (const c of m.tool_calls ?? []) {
+        let input: unknown = {}
+        try {
+          input = JSON.parse(c.arguments || '{}')
+        } catch {
+          input = {}
+        }
+        blocks.push({ type: 'tool_use', id: c.id, name: c.name, input })
+      }
+      if (blocks.length) push('assistant', blocks)
+    } else {
+      const content: Block[] = [{ type: 'text', text: m.content }]
+      for (const img of [...(m.images ?? []), ...(idx === lastUser ? images : [])]) {
+        content.push({ type: 'image', source: { type: 'base64', media_type: img.mime, data: img.data } })
+      }
+      push('user', content)
+    }
+  })
 
   const res = await fetch(`${provider.baseUrl.replace(/\/$/, '')}/v1/messages`, {
     method: 'POST',
@@ -147,7 +172,7 @@ async function chatAnthropic(
     },
     body: JSON.stringify({
       model: provider.model,
-      max_tokens: 4096,
+      max_tokens: 16000,
       system,
       tools: tools.map((t) => ({
         name: t.name,

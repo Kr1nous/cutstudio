@@ -45,7 +45,12 @@ export function sliceWaveform(peaks: number[] | undefined, assetDurMs: number, i
   return peaks.slice(i0, i1 + 1)
 }
 
-export function onsetTimes(peaks: number[], durationMs: number, thresh = 0.55): number[] {
+/**
+ * 鼓点时间（素材源毫秒）。传入 beats（index.beats，10ms 精度 onset 检测结果）时优先使用；
+ * 否则退回基于 240 桶波形的粗略峰值。
+ */
+export function onsetTimes(peaks: number[], durationMs: number, thresh = 0.55, beats?: number[]): number[] {
+  if (beats?.length) return beats.filter((t) => t >= 0 && (durationMs <= 0 || t <= durationMs))
   if (peaks.length < 3 || durationMs <= 0) return []
   const out: number[] = []
   for (let i = 1; i < peaks.length - 1; i++) {

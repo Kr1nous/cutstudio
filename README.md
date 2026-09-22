@@ -1,9 +1,9 @@
-# 剪辑台 (videocut) 1.1.0
+# 剪辑台 (videocut) 1.2.0
 
 macOS 桌面剪辑软件（Tauri 2）。面向已经录制好的影片：人在界面里剪，AI 通过 **终端 CLI** 或 **MCP** 接管同一套工具。字幕走独立字幕轨。界面靠近 iMovie / After Effects 的简洁面板，而不是 Premiere 面板墙。
 
 仓库：https://github.com/Kr1nous/videocut  
-安装包：见 [Releases](https://github.com/Kr1nous/videocut/releases) 里的 [`CutStudio_1.1.0_aarch64.dmg`](https://github.com/Kr1nous/videocut/releases/download/v1.1.0/CutStudio_1.1.0_aarch64.dmg)（Apple Silicon）。安装后应用名叫「剪辑台」。
+安装包：见 [Releases](https://github.com/Kr1nous/videocut/releases) 里的 [`CutStudio_1.2.0_aarch64.dmg`](https://github.com/Kr1nous/videocut/releases/download/v1.2.0/CutStudio_1.2.0_aarch64.dmg)（Apple Silicon）。安装后应用名叫「剪辑台」。
 
 ## 运行
 
@@ -48,28 +48,38 @@ npm run build
 
 ## AI 怎么接入
 
+推荐做法：在工具栏「终端」里直接运行 `claude` / `codex` / `grok` / `gemini`，然后用一句话说要剪成什么样（例如「剪成 60 秒竖屏短视频，去口头禅，加大字幕和背景音乐」）。
+
+- 打开工程时，剪辑台会在工程目录写好 `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` 和 Claude Code 技能，agent 启动就能读到完整的剪辑流程和规则，不需要手动粘贴提示词。
+- 内置终端里 `claude` / `grok` 在其他目录启动时，也会通过 `--append-system-prompt` / `--rules` 自动带上剪辑说明。
+- agent 通过 `cutstudio` 命令操作当前工程，改动实时出现在时间线上，右侧「审查」能看到并撤销每一步。
+
 | 入口 | 用法 |
 |---|---|
-| 终端 | 工具栏「终端」，运行 `cutstudio help` |
-| MCP | `http://127.0.0.1:4877/mcp`，配置在「MCP」按钮里 |
+| 终端 | 工具栏「终端」，运行 agent，或 `cutstudio help` |
+| MCP | `http://127.0.0.1:4877/mcp`，配置在「MCP」按钮里；`initialize` 返回剪辑说明，`prompts/get` 取配方 |
 
 ```bash
-cutstudio prompt
-cutstudio remove-silence
-cutstudio captions-from-transcript
-cutstudio apply --summary "说明" --ops '[...]'
-cutstudio help
+cutstudio prompt [talking_head|shorts|vlog|interview|product]   # 剪辑说明 / 配方
+cutstudio tools [工具名]                                         # 工具说明和参数
+cutstudio get-transcript                                          # 可剪辑的文稿
+cutstudio cut-sentences --sentence-ids <id,id>                    # 按文稿删句
+cutstudio frame --at 3000                                         # 看画面（输出 JPEG）
+cutstudio review-timeline                                         # 交付前质检
 ```
+
+语音转写用本地 whisper.cpp（`brew install whisper-cpp`，模型放在 `~/Library/Application Support/剪辑台/whisper/`）。云端转写默认关闭，可在设置里打开。
 
 ## 工具（人点选项卡 = AI 调同名函数）
 
-- 剪辑：`remove_silence` `jump_cut` `split_on_scenes` `duplicate_clip` `detach_audio` `replace_clip` `slow_motion` `set_speed` `reset_fx` `keep_speech` `fit_duration` `remove_filler` `set_keyframe` `freeze_frame` `reverse_clip`
-- 转场：`set_transition` `fade_to_black` `fade_from_black`（溶解 / 淡黑 / 淡白 / 推）
-- 文字：`captions_from_transcript` `set_subtitle_style` `shift_subtitles` `export_srt` `add_title` `lower_third` `add_text_layer` `animate_text` `add_shape` `set_text`
-- 音频：`normalize_loudness` `fade_audio` `mute_clip` `duck_music` `audio_preset` `set_music` `link_to_audio` `denoise_audio`（波形、音量关键帧、跟鼓点、轻量降噪）
-- 画面：`set_aspect` `reframe` `rotate` `flip` `zoom_in` `auto_enhance` `overlay_broll` `add_layer` `set_blend` `add_adjustment_layer` `add_solid` `crop` `color_adjust` `set_opacity` `set_transform` `stabilize` `key_color`
-- 特效：`add_effect` `list_effects` `apply_lut`（高斯/径向模糊、发光、颗粒、马赛克、LUT）
-- 蒙版：`add_mask` `set_mask` `remove_mask`（矩形/椭圆，加/减，羽化；预览里可拖）
+- 看素材：`get_project` `get_index` `get_transcript` `get_frame` `contact_sheet` `review_timeline` `render_preview`
+- 按文稿剪：`detect_retakes` `cut_sentences` `remove_filler` `tighten_pauses` `remove_silence` `correct_transcript` `set_vocabulary` `reanalyze_asset`
+- 剪辑手法：`punch_in` `ken_burns` `speed_ramp` `insert_broll` `adjust_broll` `audio_lead`（J/L cut） `snap_cuts_to_beats` `set_speed` `freeze_frame` `reverse_clip` `set_keyframe`
+- 转场：`set_transition` `fade_to_black` `fade_from_black`（默认硬切，只在段落切换处用溶解 / 暗场）
+- 字幕与包装：`captions_from_transcript` `set_subtitle_style`（clean / boxed / karaoke / keyword） `title_card`（片头 / 章节卡 / 片尾） `set_chapters` `animate_text` `add_text_layer` `add_shape`
+- 声音：`normalize_loudness`（按 LUFS） `voice_enhance` `denoise_audio` `set_music`（按响度自动定音量） `duck_music`（人声侧链闪避） `fade_audio`
+- 画面：`reframe`（竖屏跟随人物） `auto_enhance` `color_match` `apply_lut` `color_adjust` `set_transform` `crop` `stabilize` `key_color` `add_effect`
+- 图层与蒙版：`add_layer` `set_blend` `add_adjustment_layer` `add_solid` `add_mask` `set_mask` `remove_mask`
 - 工程：`apply_ops` `undo` `export` `render_queue_add` `make_proxy` `delete_asset` `remove_clip`
 
 预览和导出走同一套 ClipFx 合成（变换、滤镜、特效、LUT、抠像、透明、裁切、翻转、淡化、溶解/淡黑/淡白/推、变速、音量关键帧、跟鼓点）。稳像走 ffmpeg deshake；降噪走 afftdn。导出：H.264、透明 MOV/ProRes、队列、半分辨率代理（预览用代理，成片用原片）。路线图见 `docs/ae-complete-roadmap.md`。
@@ -81,7 +91,16 @@ src-tauri/            Tauri 2 窗口、菜单、系统对话框、拉起后端
 src/main/sidecar.ts   Node 后端 HTTP + SSE（状态 / 终端 / 媒体）
 src/main/core.ts      项目存取、底层 op、删除素材、撤销
 src/main/actions.ts   高层工具（UI / MCP / CLI 共用）
-src/main/ai/          多模型工具循环（MCP 侧）
+src/main/textedit.ts  按文稿剪辑、字幕、质检工具
+src/main/craft.ts     剪辑手法（放大、B-roll、J/L cut、变速、推镜、鼓点）
+src/main/visual.ts    画幅跟随、自动调色、色调匹配
+src/main/titles.ts    标题模板、章节
+src/main/analysis/    静音 / 停顿 / 响度 / 节拍 / 镜头 / 转写 / 人物检测
+src/main/review/      自动质检
+src/main/agentdocs.ts 给终端 agent 写剪辑说明
+src/main/eval/        AI 剪辑评测（npm run eval）
+src/shared/prompts/   剪辑说明与配方（agent / MCP / CLI 共用）
+src/main/ai/          工具注册、看图工具、内置模型循环
 src/main/mcp/         MCP HTTP + stdio 代理
 src/main/terminal.ts  内置终端，PATH 含 cutstudio
 src/main/media.ts     缩略图

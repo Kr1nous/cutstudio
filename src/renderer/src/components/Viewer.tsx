@@ -2,13 +2,21 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEven
 import type { ClipMask, MediaAsset, ProjectSettings, SubtitleStyle, Timeline, TimelineClip } from '@shared/types'
 import { fxAt } from '@shared/anim'
 import { clipAtTime, clipFx, playbackPath, subtitleAtTime } from '@shared/types'
-import { canvasComposite, layersAt, type CompLayer } from '@shared/compose'
+import {
+  DEFAULT_BOX_COLOR,
+  DEFAULT_BOX_OPACITY,
+  DEFAULT_HIGHLIGHT,
+  karaokeLines,
+  keywordRuns,
+  subtitlePreset,
+  type TextRun, wrapSubtitleText } from '@shared/subtitle'
+import { canvasComposite, layersAt, sourceTimeMs, type CompLayer } from '@shared/compose'
 import { applyEffectsCanvas, clipEffects, makeLut, type CubeLut } from '@shared/effects'
 import { applyKeyCanvas } from '@shared/key'
 import { applyCanvasMask, axisScale, clampMask, containBase, layerBox, pathMask } from '@shared/mask'
-import { clipText, visibleText } from '@shared/text'
+import { clipText, textScale, visibleText } from '@shared/text'
 import { volumeAt } from '@shared/audio'
-import { videoFilterCss } from '@shared/fx'
+import { applyWarmthCanvas, videoFilterCss } from '@shared/fx'
 import { formatTimecode, mediaUrl } from '../lib/format'
 
 type VisualEl = HTMLVideoElement | HTMLImageElement
@@ -83,7 +91,7 @@ function drawLayer(
   clip: TimelineClip,
   blend: CompLayer['blend'],
   timeMs: number,
-  slide = 0
+  motion: Pick<CompLayer, 'slide' | 'slideY' | 'zoom' | 'wipe' | 'iris' | 'blur'> = {}
 ) {
   const fx = fxAt(clip, timeMs)
   const { w: sw, h: sh } = sourceSize(el)
@@ -114,6 +122,7 @@ function drawLayer(
     bctx.drawImage(copy, 0, 0)
     bctx.filter = 'none'
   }
+  applyWarmthCanvas(bctx, boxW, boxH, fx)
   applyEffectsCanvas(bctx, boxW, boxH, fx, lutFor(fx))
   const link = fx.audioLink
   if (link && (link.prop === 'glow' || link.prop === 'both')) {
@@ -134,12 +143,34 @@ function drawLayer(
   }
   applyKeyCanvas(bctx, boxW, boxH, fx)
   applyCanvasMask(bctx, boxW, boxH, fx.masks)
+  if (motion.blur && motion.blur > 0.4) {
+    const copy = rasterCopy(buf)
+    bctx.filter = `blur(${motion.blur}px)`
+    bctx.clearRect(0, 0, boxW, boxH)
+    bctx.drawImage(copy, 0, 0)
+    bctx.filter = 'none'
+  }
   ctx.save()
   ctx.globalCompositeOperation = canvasComposite(blend)
   ctx.globalAlpha = opacity
-  ctx.translate(fx.posX * canvasW + slide * canvasW, fx.posY * canvasH)
+  ctx.translate(fx.posX * canvasW + (motion.slide ?? 0) * canvasW, fx.posY * canvasH + (motion.slideY ?? 0) * canvasH)
   if (fx.rotate) ctx.rotate((fx.rotate * Math.PI) / 180)
-  ctx.scale(fx.flipX ? -1 : 1, fx.flipY ? -1 : 1)
+  const z = motion.zoom && motion.zoom > 0 ? motion.zoom : 1
+  ctx.scale((fx.flipX ? -1 : 1) * z, (fx.flipY ? -1 : 1) * z)
+  if (motion.wipe) {
+    const t = Math.min(1, Math.max(0, motion.wipe.t))
+    ctx.beginPath()
+    if (motion.wipe.dir === 'left') ctx.rect(-boxW / 2, -boxH / 2, boxW * t, boxH)
+    else if (motion.wipe.dir === 'right') ctx.rect(boxW / 2 - boxW * t, -boxH / 2, boxW * t, boxH)
+    else if (motion.wipe.dir === 'up') ctx.rect(-boxW / 2, boxH / 2 - boxH * t, boxW, boxH * t)
+    else ctx.rect(-boxW / 2, -boxH / 2, boxW, boxH * t)
+    ctx.clip()
+  }
+  if (motion.iris != null) {
+    ctx.beginPath()
+    ctx.arc(0, 0, Math.max(0, motion.iris) * Math.hypot(boxW, boxH) * 0.55, 0, Math.PI * 2)
+    ctx.clip()
+  }
   ctx.drawImage(buf, -boxW / 2, -boxH / 2)
   ctx.restore()
 }
@@ -173,6 +204,7 @@ function drawSolid(
     bctx.drawImage(tmp, 0, 0)
     bctx.filter = 'none'
   }
+  applyWarmthCanvas(bctx, boxW, boxH, fx)
   applyEffectsCanvas(bctx, boxW, boxH, fx, lutFor(fx))
   applyKeyCanvas(bctx, boxW, boxH, fx)
   applyCanvasMask(bctx, boxW, boxH, fx.masks)
@@ -225,7 +257,7 @@ function drawTextLayer(
   const t = clipText(clip)
   const text = visibleText(clip, timeMs)
   if (!text) return
-  const size = Math.round((t.fontSize || 72) * (canvasW / 1920) * (fx.scale || 1))
+  const size = Math.round((t.fontSize || 72) * textScale(canvasW, canvasH) * (fx.scale || 1))
   ctx.save()
   ctx.globalCompositeOperation = canvasComposite(blend)
   ctx.globalAlpha = opacity
@@ -233,7 +265,7 @@ function drawTextLayer(
   ctx.textAlign = t.align === 'left' ? 'left' : t.align === 'right' ? 'right' : 'center'
   ctx.textBaseline = 'middle'
   ctx.lineJoin = 'round'
-  ctx.lineWidth = Math.max(1, (t.strokeWidth ?? 3) * (canvasW / 1920))
+  ctx.lineWidth = Math.max(1, (t.strokeWidth ?? 3) * textScale(canvasW, canvasH))
   ctx.strokeStyle = t.stroke || '#000'
   ctx.fillStyle = t.color || '#fff'
   const x = fx.posX * canvasW
@@ -419,7 +451,6 @@ export function Viewer({
   const layers = useMemo(() => layersAt(timeline, playheadMs), [timeline, playheadMs])
   layersRef.current = layers
   const cue = subtitleAtTime(timeline.subtitles, playheadMs)
-  const music = clipAtTime(timeline.audio, playheadMs)
   const story = clipAtTime(timeline.storyline, playheadMs)
 
   const visualAssets = useMemo(() => {
@@ -435,9 +466,17 @@ export function Viewer({
     return list
   }, [timeline, assets])
 
-  const musicAsset = music ? assets.find((a) => a.id === music.assetId) : null
-  const musicAssetRef = useRef(musicAsset)
-  musicAssetRef.current = musicAsset
+  // 音频轨上的每个片段一个 <audio>：音乐和 J/L cut 的对白可以同时播放
+  const audioClips = useMemo(
+    () =>
+      timeline.audio
+        .map((clip) => ({ clip, asset: assets.find((a) => a.id === clip.assetId) }))
+        .filter((x): x is { clip: TimelineClip; asset: MediaAsset } => Boolean(x.asset)),
+    [timeline.audio, assets]
+  )
+  const audioKey = audioClips.map((x) => `${x.clip.id}:${x.asset.path}`).join('|')
+  const assetsRef = useRef(assets)
+  assetsRef.current = assets
 
   function currentTimeMs() {
     if (playingRef.current) {
@@ -484,6 +523,7 @@ export function Viewer({
           } else {
             octx.drawImage(canvas, 0, 0)
           }
+          applyWarmthCanvas(octx, off.width, off.height, clipFx(layer.clip))
           applyEffectsCanvas(octx, off.width, off.height, clipFx(layer.clip), lutFor(clipFx(layer.clip)))
           ctx.save()
           ctx.globalAlpha = layer.opacity
@@ -519,7 +559,7 @@ export function Viewer({
         }
         const el = nodesRef.current.get(layer.clip.assetId)
         if (!el || el instanceof HTMLAudioElement) continue
-        drawLayer(ctx, el, layer.opacity, canvas.width, canvas.height, clipForDraw, blend, t, layer.slide ?? 0)
+        drawLayer(ctx, el, layer.opacity, canvas.width, canvas.height, clipForDraw, blend, t, layer)
       }
       const fadeWhite = Math.max(0, ...nowLayers.map((l) => l.fadeWhite ?? 0))
       if (fadeWhite > 0) {
@@ -528,26 +568,66 @@ export function Viewer({
         ctx.fillRect(0, 0, canvas.width, canvas.height)
         ctx.restore()
       }
+      const fadeBlack = Math.max(0, ...nowLayers.map((l) => l.fadeBlack ?? 0))
+      if (fadeBlack > 0) {
+        ctx.save()
+        ctx.fillStyle = `rgba(0,0,0,${fadeBlack})`
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        ctx.restore()
+      }
       if (nowCue) {
         const style = subtitleStyleRef.current
-        const size = Math.round((style?.fontSize ?? 42) * (canvas.width / 1920))
+        const size = Math.round((style?.fontSize ?? 42) * textScale(canvas.width, canvas.height))
+        const preset = subtitlePreset(style)
+        const color = style?.color ?? '#fff'
+        const highlight = style?.highlightColor || DEFAULT_HIGHLIGHT
+        const font = (px: number) => `600 ${px}px "PingFang SC", "Hiragino Sans GB", sans-serif`
+        const wrapped = style ? { ...nowCue, text: wrapSubtitleText(nowCue.text, style, canvas.width, canvas.height) } : nowCue
+        const lines: TextRun[][] =
+          (preset === 'karaoke' ? karaokeLines(wrapped) : null) ??
+          wrapped.text
+            .split('\n')
+            .map((line) => (preset === 'keyword' ? keywordRuns(line, style?.keywords) : line ? [{ text: line }] : []))
+        const lineH = size * 1.3
+        const blockH = lineH * lines.length
+        const anchorY =
+          style?.position === 'top'
+            ? canvas.height * 0.1 + lineH / 2
+            : style?.position === 'center'
+              ? canvas.height / 2 - blockH / 2 + lineH / 2
+              : canvas.height * 0.9 - blockH + lineH / 2
         ctx.save()
-        ctx.font = `600 ${size}px "PingFang SC", "Hiragino Sans GB", sans-serif`
-        ctx.textAlign = 'center'
+        ctx.textAlign = 'left'
         ctx.textBaseline = 'middle'
         ctx.lineJoin = 'round'
         ctx.lineWidth = Math.max(2, size / 16)
         ctx.strokeStyle = style?.stroke ?? '#000'
-        ctx.fillStyle = style?.color ?? '#fff'
-        const x = canvas.width / 2
-        const y =
-          style?.position === 'top'
-            ? canvas.height * 0.1
-            : style?.position === 'center'
-              ? canvas.height / 2
-              : canvas.height * 0.9
-        ctx.strokeText(nowCue.text, x, y)
-        ctx.fillText(nowCue.text, x, y)
+        lines.forEach((runs, li) => {
+          const y = anchorY + li * lineH
+          const runSize = (r: TextRun) => (preset === 'keyword' && r.hit ? Math.round(size * 1.15) : size)
+          const widths = runs.map((r) => {
+            ctx.font = font(runSize(r))
+            return ctx.measureText(r.text).width
+          })
+          const total = widths.reduce((n, w) => n + w, 0)
+          let x = canvas.width / 2 - total / 2
+          if (preset === 'boxed' && total > 0) {
+            const pad = size * 0.22
+            ctx.fillStyle = style?.boxColor || DEFAULT_BOX_COLOR
+            ctx.globalAlpha = style?.boxOpacity ?? DEFAULT_BOX_OPACITY
+            ctx.fillRect(x - pad, y - lineH / 2, total + pad * 2, lineH)
+            ctx.globalAlpha = 1
+          }
+          runs.forEach((r, ri) => {
+            ctx.font = font(runSize(r))
+            const on =
+              (preset === 'keyword' && r.hit) || (preset === 'karaoke' && r.startMs != null && t >= r.startMs)
+            ctx.fillStyle = on ? highlight : color
+            if (preset !== 'boxed') ctx.strokeText(r.text, x, y)
+            ctx.fillText(r.text, x, y)
+            x += widths[ri] ?? 0
+          })
+        })
         ctx.restore()
       }
       if (selected) {
@@ -618,7 +698,6 @@ export function Viewer({
     const t = currentTimeMs()
     const tl = timelineRef.current
     const nowLayers = layersAt(tl, t)
-    const nowMusic = clipAtTime(tl.audio, t)
     const nowStory = clipAtTime(tl.storyline, t)
     const playingNow = playingRef.current
     for (const layer of nowLayers) {
@@ -652,24 +731,39 @@ export function Viewer({
         if (opts.seek) seekMedia(el, local, 0.04)
       }
     }
-    const audioAsset = musicAssetRef.current
-    if (nowMusic && audioAsset) {
-      const el = nodesRef.current.get(audioAsset.id)
-      if (el instanceof HTMLMediaElement) {
-        const fx = clipFx(nowMusic)
-        const local = ((t - nowMusic.startMs) * (fx.speed || 1)) / 1000 + nowMusic.inMs / 1000
-        if (opts.seek) seekMedia(el, local, playingNow ? 0.25 : 0.04)
-        const duck = tl.duck?.enabled && nowStory ? tl.duck.ratio : 1
-        try {
-          el.volume = Math.min(1, volumeAt(nowMusic, t) * duck)
-        } catch {
-          /* ignore */
+    // 闪避近似导出的侧链：故事线此刻有人声（按素材能量分析的语音段）才压低音乐
+    const speaking = (() => {
+      if (!tl.duck?.enabled || !nowStory || nowStory.volume <= 0) return false
+      const speech = assetsRef.current.find((a) => a.id === nowStory.assetId)?.index?.speech
+      if (!speech?.length) return true
+      const src = sourceTimeMs(nowStory, t)
+      return speech.some((r) => src >= r.startMs - 150 && src <= r.endMs + 300)
+    })()
+    for (const clip of tl.audio) {
+      const el = nodesRef.current.get(`aud:${clip.id}`)
+      if (!(el instanceof HTMLMediaElement)) continue
+      const active = t >= clip.startMs && t < clip.startMs + clip.durationMs
+      if (!active) {
+        if (!el.paused) el.pause()
+        continue
+      }
+      const fx = clipFx(clip)
+      const local = ((t - clip.startMs) * (fx.speed || 1)) / 1000 + clip.inMs / 1000
+      if (opts.seek) seekMedia(el, local, playingNow ? 0.25 : 0.04)
+      const duck = clip.role !== 'dialog' && speaking ? tl.duck!.ratio : 1
+      try {
+        el.volume = Math.min(1, Math.max(0, volumeAt(clip, t) * duck))
+        el.playbackRate = fx.speed || 1
+      } catch {
+        /* ignore */
+      }
+      if (playingNow) {
+        if (el.paused) {
+          seekMedia(el, local, 0.04)
+          if (opts.play || !opts.seek) void el.play().catch(() => undefined)
         }
-        if (playingNow) {
-          if (opts.play && el.paused) void el.play().catch(() => undefined)
-        } else if (!el.paused) {
-          el.pause()
-        }
+      } else if (!el.paused) {
+        el.pause()
       }
     }
   }
@@ -717,22 +811,23 @@ export function Viewer({
         }
       }
     }
-    if (musicAsset) {
-      keep.add(musicAsset.id)
-      let el = nodes.get(musicAsset.id)
-      if (!(el instanceof HTMLAudioElement) && !(el instanceof HTMLVideoElement)) {
+    for (const { clip, asset } of audioClips) {
+      const key = `aud:${clip.id}`
+      keep.add(key)
+      let el = nodes.get(key)
+      if (!(el instanceof HTMLAudioElement)) {
         el?.remove()
         const a = document.createElement('audio')
-        a.preload = 'metadata'
+        a.preload = 'auto'
         a.crossOrigin = 'anonymous'
         host.appendChild(a)
         el = a
-        nodes.set(musicAsset.id, el)
+        nodes.set(key, el)
       }
-      const url = mediaUrl(musicAsset.path)
-      if (el && 'src' in el && (el as HTMLMediaElement).dataset.src !== url) {
-        ;(el as HTMLMediaElement).src = url
-        ;(el as HTMLMediaElement).dataset.src = url
+      const url = mediaUrl(asset.path)
+      if (el.dataset.src !== url) {
+        el.src = url
+        el.dataset.src = url
       }
     }
     for (const [id, el] of nodes) {
@@ -741,13 +836,14 @@ export function Viewer({
         nodes.delete(id)
       }
     }
-  }, [visualAssets, musicAsset])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visualAssets, audioKey])
 
   useEffect(() => {
     if (playing) return
     syncMedia({ seek: true, play: false })
     paint()
-  }, [playheadMs, playing, layers, music, musicAsset, story, timeline.duck, cue, subtitleStyle, viewSize, selectedClip, liveMasks, liveXform, activeMaskId])
+  }, [playheadMs, playing, layers, audioKey, story, timeline.duck, cue, subtitleStyle, viewSize, selectedClip, liveMasks, liveXform, activeMaskId])
 
   useEffect(() => {
     if (!playing) {

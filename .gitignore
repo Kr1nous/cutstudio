@@ -16,3 +16,5 @@ src-tauri/resources/cli
 app-icon.png
 imagine-src.jpg
 *.tsbuildinfo
+
+eval-results/

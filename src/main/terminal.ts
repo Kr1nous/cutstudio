@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { agentGuide, writeAgentDocs } from './agentdocs'
 import { store } from './core'
 import { cliBinDir, extraBinPath, userDataDir } from './paths'
 
@@ -20,10 +21,13 @@ export function setTerminalSink(next: TerminalSink | null): void {
   sink = next
 }
 
-function zdotDir(): string {
+export function zdotDir(): string {
   const dir = join(userDataDir(), 'terminal-zdot')
   mkdirSync(dir, { recursive: true })
   const bin = cliBinDir()
+  // 剪辑说明另存一份：包装函数直接读文件，不依赖剪辑台 MCP 在不在线
+  const guide = join(dir, 'cutstudio-guide.md')
+  writeFileSync(guide, agentGuide(), 'utf8')
   writeFileSync(
     join(dir, '.zshrc'),
     `# 剪辑台内置终端
@@ -31,11 +35,34 @@ function zdotDir(): string {
 export PATH="${bin}:$PATH"
 export CUT_STUDIO_MCP_URL="\${CUT_STUDIO_MCP_URL:-http://127.0.0.1:4877/mcp}"
 alias cs=cutstudio
+
+# 启动 AI agent 时自动带上剪辑说明（cutstudio prompt）：
+# 工程目录里有剪辑台自动生成的 CLAUDE.md / AGENTS.md 时 agent 会自己读；没有（比如 cd 到别处）就用启动参数注入。
+__cs_auto_doc() { [[ -f "$1" ]] && grep -q 'cutstudio:auto' "$1" 2>/dev/null }
+__cs_prompt() { if [[ -f "${guide}" ]]; then cat "${guide}"; else cutstudio prompt 2>/dev/null; fi }
+claude() {
+  if __cs_auto_doc CLAUDE.md; then command claude "$@"; return; fi
+  local p; p="$(__cs_prompt)"
+  if [[ -n "$p" ]]; then command claude --append-system-prompt "$p" "$@"; else command claude "$@"; fi
+}
+grok() {
+  if __cs_auto_doc AGENTS.md; then command grok "$@"; return; fi
+  local p; p="$(__cs_prompt)"
+  if [[ -n "$p" ]]; then command grok --rules "$p" "$@"; else command grok "$@"; fi
+}
+codex() {
+  __cs_auto_doc AGENTS.md || echo "（提示：当前目录没有剪辑台说明，codex 读不到剪辑规则；cd 回工程目录，或先运行 cutstudio prompt 贴给它）"
+  command codex "$@"
+}
+gemini() {
+  __cs_auto_doc GEMINI.md || echo "（提示：当前目录没有剪辑台说明，gemini 读不到剪辑规则；cd 回工程目录，或先运行 cutstudio prompt 贴给它）"
+  command gemini "$@"
+}
+
 echo ""
-echo "剪辑台终端 · 带 CLI 的 AI 可在此接管剪辑"
-echo "  cutstudio prompt   给 AI 看的完整说明（先运行）"
+echo "剪辑台终端 · 在这里启动 AI 接管剪辑：claude / codex / grok / gemini"
+echo "  启动后会自动读到剪辑说明（工程目录的 CLAUDE.md / AGENTS.md / GEMINI.md），直接告诉它要剪成什么样即可"
 echo "  cutstudio help     命令列表"
-echo "  grok / claude / codex 等可直接运行，用 cutstudio 改时间线"
 echo ""
 `,
     'utf8'
@@ -114,6 +141,14 @@ function spawnScript(_cols: number, _rows: number, cwd: string): Session {
 export async function startTerminal(cols: number, rows: number): Promise<{ ok: boolean; reused: boolean; cwd: string; cli: string }> {
   if (session) return { ok: true, reused: true, cwd: store.projectPath || homedir(), cli: cliBinDir() }
   const cwd = store.projectPath || homedir()
+  // 每次开终端都刷新一遍说明文件（剪辑规则改了也能同步）
+  if (store.projectPath) {
+    try {
+      writeAgentDocs(store.projectPath)
+    } catch {
+      /* 写不了（权限等）就靠 shell 包装函数注入 */
+    }
+  }
   session = await spawnPty(Math.max(40, cols || 80), Math.max(10, rows || 24), cwd)
   return { ok: true, reused: false, cwd, cli: cliBinDir() }
 }

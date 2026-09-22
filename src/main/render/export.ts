@@ -1,6 +1,7 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { even } from '../../shared/compose'
+import { VOICE_FILTERS } from '../../shared/voice'
 import { id, nowIso } from '../../shared/ids'
 import {
   type ExportPreset,
@@ -10,7 +11,7 @@ import {
   timelineDurationMs
 } from '../../shared/types'
 import { store } from '../core'
-import { findFfmpeg, findFfprobe, probeHasAudio, probeHasVideo, runFfmpeg } from './ffmpeg'
+import { ffmpegHasFilter, findFfmpeg, findFfprobe, probeHasAudio, probeHasVideo, runFfmpeg } from './ffmpeg'
 import { buildGraph, canvasSize, writeAss, type StreamInfo } from './graph'
 import { bakeTextLayers } from './textpng'
 
@@ -52,7 +53,21 @@ export async function collectStreams(
   return map
 }
 
-export async function renderTimeline(project: Project, outPath: string, preset = '1080p'): Promise<void> {
+/** renderTimeline 的覆盖项：render_preview 用低清尺寸和快速编码。 */
+export type RenderOverrides = { size?: { width: number; height: number }; encode?: string[] }
+
+/** 工程里有片段开了人声增强时，查一下本机 ffmpeg 有哪些相关滤镜（没有的跳过）。 */
+async function voiceFilterSet(ffmpeg: string, project: Project): Promise<Set<string> | undefined> {
+  const clips = [...project.timeline.storyline, ...project.timeline.audio]
+  if (!clips.some((c) => c.fx?.voice?.preset)) return undefined
+  const have = new Set<string>()
+  for (const f of VOICE_FILTERS) if (await ffmpegHasFilter(ffmpeg, f)) have.add(f)
+  const missing = VOICE_FILTERS.filter((f) => !have.has(f))
+  if (missing.length) lastRenderWarnings.push(`本机 ffmpeg 缺少 ${missing.join(' / ')}，人声增强跳过了这些滤镜。`)
+  return have
+}
+
+export async function renderTimeline(project: Project, outPath: string, preset = '1080p', overrides: RenderOverrides = {}): Promise<void> {
   const ffmpeg = await findFfmpeg()
   if (!ffmpeg) throw new Error('本机没有 ffmpeg。安装后再导出，或先用预览窗审查成片。')
   if (project.timeline.storyline.length === 0 && project.timeline.overlays.length === 0) {
@@ -60,11 +75,23 @@ export async function renderTimeline(project: Project, outPath: string, preset =
   }
   const ffprobe = await findFfprobe(ffmpeg)
   const size = canvasSize(project.settings, preset)
-  const width = even(size.width)
-  const height = even(size.height)
+  const width = even(overrides.size?.width ?? size.width)
+  const height = even(overrides.size?.height ?? size.height)
   const exportDir = join(outPath, '..')
   await mkdir(exportDir, { recursive: true })
-  const assPath = await writeAss(project, exportDir, width, height)
+  lastRenderWarnings = []
+  const subs = project.timeline.subtitles
+  const canBurn = await ffmpegHasFilter(ffmpeg, 'ass')
+  const assPath = canBurn ? await writeAss(project, exportDir, width, height) : null
+  let softSrt: string | null = null
+  if (subs.length && !canBurn) {
+    // 本机 ffmpeg 没有 libass：字幕改为软字幕轨 + 同名 .srt，而不是整个导出失败。
+    softSrt = outPath.replace(/\.[^.]+$/, '') + '.srt'
+    await writeFile(softSrt, srtText(subs), 'utf8')
+    lastRenderWarnings.push(
+      `本机 ffmpeg 不支持烧录字幕（缺 libass），字幕以软字幕轨写入并另存 ${softSrt}。要把字幕烧进画面，请安装带 libass 的 ffmpeg。`
+    )
+  }
   const bakedText = await bakeTextLayers(project.timeline.overlays, exportDir, width, height, size.fps)
   const streams = await collectStreams(ffprobe, project)
   const graph = buildGraph(project, {
@@ -74,19 +101,23 @@ export async function renderTimeline(project: Project, outPath: string, preset =
     alpha: size.alpha,
     streams,
     assPath,
-    bakedText
+    bakedText,
+    filters: await voiceFilterSet(ffmpeg, project)
   })
 
   const args: string[] = ['-y', '-hide_banner']
   for (const input of graph.inputs) {
     args.push(...input.args, '-i', input.path)
   }
+  if (softSrt) args.push('-i', softSrt)
   args.push('-filter_complex', graph.filter, '-map', graph.videoMap)
   if (graph.audioMap) args.push('-map', graph.audioMap)
   else args.push('-an')
+  if (softSrt) args.push('-map', `${graph.inputs.length}:s`)
 
-  args.push(...videoEncodeArgs(preset))
+  args.push(...(overrides.encode ?? videoEncodeArgs(preset)))
   if (graph.audioMap) args.push('-c:a', 'aac', '-b:a', '192k')
+  if (softSrt) args.push('-c:s', 'mov_text')
   args.push('-t', (graph.durationMs / 1000).toFixed(3), outPath)
 
   let result = await runFfmpeg(ffmpeg, args)
@@ -100,6 +131,20 @@ export async function renderTimeline(project: Project, outPath: string, preset =
     result = await runFfmpeg(ffmpeg, fallback)
   }
   if (result.code !== 0) throw new Error(result.stderr.slice(-1200) || '导出失败')
+}
+
+/** 最近一次 renderTimeline 的提醒（导出工具会转给 AI / 界面）。 */
+export let lastRenderWarnings: string[] = []
+
+export function srtText(subs: { startMs: number; endMs: number; text: string }[]): string {
+  const fmt = (ms: number) => {
+    const t = Math.max(0, Math.round(ms))
+    const h = Math.floor(t / 3600000)
+    const m = Math.floor((t % 3600000) / 60000)
+    const s = Math.floor((t % 60000) / 1000)
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(t % 1000).padStart(3, '0')}`
+  }
+  return subs.map((c, i) => `${i + 1}\n${fmt(c.startMs)} --> ${fmt(c.endMs)}\n${c.text}\n`).join('\n')
 }
 
 export async function exportTimeline(preset = '1080p', fileHint?: string): Promise<string> {

@@ -2,16 +2,11 @@ import { readFile } from 'node:fs/promises'
 import { store } from '../core'
 import { chatWithTools, type ChatMessage } from './providers'
 import { ALL_TOOLS, executeTool } from './tools'
+import { fullPrompt } from '../../shared/prompts'
+import { isVisionResult } from './vision'
 
-const SYSTEM = `你是「剪辑台」的剪辑导演。软件用于剪已经录制好的成片素材。
-
-工作原则：
-- 你完全接管剪辑，人类只做微调。不要问「要不要我剪」，直接调用工具。
-- 优先用高层工具省 token：remove_silence、keep_speech、fit_duration、captions_from_transcript、remove_filler、split_on_scenes、normalize_loudness、set_transition、reframe、auto_enhance、add_title、animate_text、add_effect、apply_lut、stabilize、key_color、link_to_audio、denoise_audio、export、render_queue_add、make_proxy。不要自己用 trim_clip 去静音。标题用 animate_text（fade/typewriter/lower_third），不要写进字幕轨。模糊/发光/颗粒/马赛克用 add_effect，LUT 用 apply_lut（warm|cool|contrast）。手抖用 stabilize，绿/蓝幕用 key_color。画面跟鼓点用 link_to_audio，音量动画用 set_keyframe prop=volume。成片用 export 或 render_queue_add（1080p/alpha/prores）；预览卡顿用 make_proxy。
-- 字幕必须走独立字幕轨（captions_from_transcript / add_subtitle），不要烧进画面。
-- 时间单位毫秒。apply_ops 只作兜底。
-- 改完用一句中文说明，方便人类审查。
-- 没有素材时让用户导入，不要虚构 assetId。`
+const SYSTEM = fullPrompt()
+const MAX_STEPS = 40
 
 export async function runAgent(userPrompt: string, frames: { mime: string; data: string }[] = []) {
   const provider = store.activeProvider()
@@ -32,7 +27,7 @@ export async function runAgent(userPrompt: string, frames: { mime: string; data:
   const images = store.settings.allowMediaUpload ? frames.slice(0, 8) : []
   let lastText = ''
 
-  for (let step = 0; step < 8; step++) {
+  for (let step = 0; step < MAX_STEPS; step++) {
     const result = await chatWithTools(provider, messages, ALL_TOOLS, step === 0 ? images : [])
     lastText = result.text
     if (!result.toolCalls.length) break
@@ -54,11 +49,29 @@ export async function runAgent(userPrompt: string, frames: { mime: string; data:
       } catch (err) {
         toolResult = { error: err instanceof Error ? err.message : String(err) }
       }
+      let toolImages: { mime: string; data: string }[] | undefined
+      if (isVisionResult(toolResult)) {
+        if (store.settings.allowMediaUpload) {
+          toolImages = toolResult.images
+          // 只保留最近两次看图的图片，旧的换成文字，避免 base64 撑爆上下文。
+          const withImages = messages.filter((m) => m.role === 'tool' && m.images?.length)
+          for (const old of withImages.slice(0, Math.max(0, withImages.length - 1))) {
+            old.images = undefined
+            old.content += '\n（图片已从上下文移除，需要时重新调用）'
+          }
+        }
+        toolResult = {
+          ...toolResult,
+          images: [],
+          ...(toolImages ? {} : { note: '设置里关闭了媒体上传，AI 看不到画面。' })
+        }
+      }
       messages.push({
         role: 'tool',
         name: call.name,
         tool_call_id: call.id,
-        content: JSON.stringify(toolResult)
+        content: JSON.stringify(toolResult),
+        ...(toolImages?.length ? { images: toolImages } : {})
       })
     }
   }

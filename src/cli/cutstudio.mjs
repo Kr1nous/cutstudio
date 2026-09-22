@@ -8,7 +8,21 @@ const MCP = process.env.CUT_STUDIO_MCP_URL || 'http://127.0.0.1:4877/mcp'
 const HELP = `剪辑台 CLI — 在软件终端里运行，直接接管当前项目
 
 用法:
-  cutstudio prompt              打印给 AI 的完整说明（先跑这个）
+  cutstudio prompt [配方]       打印给 AI 的完整剪辑说明（先跑这个）；配方: talking_head|shorts|vlog|interview|product
+  cutstudio install-skill [目录] 给 Claude Code 写入剪辑技能（<目录>/.claude/skills/cutstudio/SKILL.md，默认当前目录）
+  cutstudio index               素材分析：说话段、镜头、响度、转写是否就绪
+  cutstudio review-timeline     自动质检成片（交付前必跑）
+  cutstudio get-transcript      可剪辑文稿（句子 id + 时间线位置）
+  cutstudio detect-retakes [--apply]            找重录；--apply 删掉前几遍
+  cutstudio cut-sentences --sentence-ids id1,id2   按文稿删句
+  cutstudio tighten-pauses --max-pause-ms 300
+  cutstudio punch-in [--clip-ids a,b] [--scale 1.12]
+  cutstudio insert-broll --asset-id <id> (--at-ms 毫秒 | --at-text "台词") [--duration-ms 3000]
+  cutstudio audio-lead --clip-id <id> --type j|l --lead-ms 500
+  任意工具：cutstudio <工具名用连字符> --参数名 值（参数名用连字符，数组用逗号分隔）
+  cutstudio tools [工具名]      全部工具（或单个工具）的说明和参数
+  cutstudio frame --at 毫秒     渲染该时刻画面，输出 JPEG 路径（用读图工具查看）
+  cutstudio contact-sheet [--start 毫秒] [--end 毫秒] [--count 12]   抽帧网格图，输出 JPEG 路径
   cutstudio status              项目是否打开、时长、片段数
   cutstudio project             当前工程 JSON（素材 + 故事线 + 字幕轨）
   cutstudio timeline            只看时间线和字幕
@@ -23,9 +37,10 @@ const HELP = `剪辑台 CLI — 在软件终端里运行，直接接管当前项
   cutstudio fit-duration --ms 60000
   cutstudio captions-from-transcript
   cutstudio set-aspect 16:9|9:16|1:1
-  cutstudio set-transition cross_dissolve|fade_black|fade_white|push|none
+  cutstudio set-transition <类型> [时长毫秒] --clip <id> | --clips id1,id2   跳剪不要加转场；类型: none|cross_dissolve|dip_black|smooth_wipe|push|zoom…
+  cutstudio list-transitions
   cutstudio fade-to-black
-  cutstudio normalize-loudness
+  cutstudio normalize-loudness [--lufs -16]
   cutstudio duck-music
   cutstudio apply-filter vivid|cinema|bw|vintage|none
   cutstudio add-effect blur|radial_blur|glow|grain|mosaic [--amount 6] [--clip id]
@@ -64,36 +79,14 @@ const HELP = `剪辑台 CLI — 在软件终端里运行，直接接管当前项
   cutstudio mcp
   cutstudio help
 
+针对片段的命令必须带 --clip <id>；支持批量的命令可用 --clip all 或 --clips id1,id2。
+
 apply 示例:
   cutstudio apply --summary "去片头" --ops '[{"op":"trim_clip","clipId":"clip_xxx","inMs":1200,"outMs":8000}]'
 `
 
-const PROMPT = `你在「剪辑台」软件的内置终端里。你的任务是完全接管剪辑，人类只做微调。
-
-当前工程通过命令 cutstudio 读写，改动会立刻出现在软件时间线上。
-
-必须遵守:
-1. 先 cutstudio project 看素材、故事线和独立字幕轨。
-2. 用 cutstudio apply / add-clip / add-subtitle 改时间线，不要只口头描述。
-3. 字幕必须走独立字幕轨（add-subtitle 或 apply 里的 add_subtitle / replace_subtitles），不要烧进画面。
-4. 时间单位是毫秒。
-5. 改完用一句中文说明你做了什么。
-
-常用:
-  cutstudio status
-  cutstudio project
-  cutstudio media
-  cutstudio import /绝对路径/成片.mp4
-  cutstudio add-clip --asset asset_xxx
-  cutstudio add-subtitle --start 0 --end 2500 --text "开场"
-  cutstudio apply --summary "重写字幕" --ops '[{"op":"replace_subtitles","cues":[...]}]'
-  cutstudio undo
-
-apply 的 op:
-  add_clip, remove_clip, trim_clip, split_clip, move_clip,
-  reorder_storyline, set_volume, replace_storyline,
-  add_subtitle, update_subtitle, remove_subtitle, replace_subtitles,
-  clear_timeline
+const PROMPT_FALLBACK = `你在「剪辑台」的内置终端里，用 cutstudio 命令接管当前工程的剪辑。
+剪辑台没有在运行，拿不到完整剪辑说明。请先打开剪辑台，再运行 cutstudio prompt。
 `
 
 async function mcp(method, params) {
@@ -113,8 +106,53 @@ async function mcp(method, params) {
   return json.result
 }
 
+/** 专用命令自己解析的简写参数（--clip、--ms 等）。 */
+const PARAM_ALIASES = {
+  at: ['atMs'],
+  start: ['startMs'],
+  end: ['endMs'],
+  ms: ['durationMs'],
+  duration: ['durationMs'],
+  in: ['inMs'],
+  out: ['outMs'],
+  clip: ['clipId'],
+  clips: ['clipIds'],
+  asset: ['assetId'],
+  query: ['q'],
+  q: ['query'],
+  text: ['atText'],
+  size: ['fontSize']
+}
+
+const ALIAS_FLAGS = new Set(['amount', 'asset', 'at', 'blend', 'clip', 'clips', 'color', 'count', 'ease', 'edge', 'end', 'filter', 'goal', 'in', 'lufs', 'min', 'mode', 'ms', 'ops', 'out', 'pad', 'path', 'preset', 'prop', 'rate', 'scale', 'spill', 'start', 'summary', 'text', 'tolerance', 'value', 'width', 'x', 'y', 'verbose'])
+
+let toolListCache = null
+async function toolSpecs() {
+  toolListCache ??= (await mcp('tools/list', {}))?.tools ?? []
+  return toolListCache
+}
+
+function paramLine(key, schema) {
+  const type = schema.enum ? schema.enum.join('|') : schema.type === 'array' ? `${schema.items?.type ?? 'any'}[]（逗号分隔）` : schema.type
+  return `--${key.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())} <${type}>${schema.description ? '  ' + schema.description : ''}`
+}
+
 async function tool(name, args = {}) {
+  // 命令行里写的、工具 schema 认识的参数一律带上（专用命令没解析的也不会被悄悄丢掉）；
+  // 既不是 schema 参数也不是简写的 --flag 直接报错。
+  if (process.argv[2] !== 'call') {
+    const spec = (await toolSpecs()).find((t) => t.name === name)
+    const props = spec?.inputSchema?.properties ?? {}
+    const generic = flagsToArgs(props)
+    const unknown = Object.keys(generic).filter((k) => !(k in props) && !ALIAS_FLAGS.has(k))
+    if (spec && unknown.length) {
+      const lines = Object.entries(props).map(([k, v]) => '  ' + paramLine(k, v))
+      throw new Error(`${name} 不认识参数：${unknown.map((k) => '--' + k.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())).join(' ')}\n可用参数：\n${lines.join('\n') || '  （无）'}`)
+    }
+    for (const [k, v] of Object.entries(generic)) if (k in props && !(k in args)) args[k] = v
+  }
   const result = await mcp('tools/call', { name, arguments: args })
+  if (result?.isError) throw new Error(result.content?.map((c) => c.text).join('\n') || `${name} 失败`)
   if (result?.structuredContent != null) return result.structuredContent
   const text = result?.content?.[0]?.text
   if (!text) return result
@@ -136,6 +174,37 @@ function arg(flag) {
   return process.argv[i + 1]
 }
 
+/** --clip id | --clip all | --clips a,b → 工具参数 */
+function clipArgs() {
+  const clips = arg('--clips')
+  if (clips) return { clipIds: clips.split(',').map((x) => x.trim()).filter(Boolean) }
+  const clip = arg('--clip')
+  return clip ? { clipId: clip } : {}
+}
+
+function flagsToArgs(props) {
+  const out = {}
+  const argv = process.argv.slice(3)
+  for (let i = 0; i < argv.length; i++) {
+    if (!argv[i].startsWith('--')) continue
+    let key = argv[i].slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())
+    // 常用简写：schema 里没有这个名字、但有对应的全名时自动换过去（--at → atMs，--query ↔ --q 等）
+    if (!(key in props)) {
+      const full = (PARAM_ALIASES[key] ?? []).find((k) => k in props)
+      if (full) key = full
+    }
+    const next = argv[i + 1]
+    const raw = next == null || next.startsWith('--') ? 'true' : (i++, next)
+    const type = props[key]?.type
+    if (type === 'number') out[key] = Number(raw)
+    else if (type === 'boolean') out[key] = raw !== 'false'
+    else if (type === 'array') out[key] = raw.trim().startsWith('[') ? JSON.parse(raw) : raw.split(',').map((x) => x.trim()).filter(Boolean)
+    else if (type === 'object') out[key] = JSON.parse(raw)
+    else out[key] = raw
+  }
+  return out
+}
+
 function restFiles(after) {
   const i = process.argv.indexOf(after)
   return i < 0 ? [] : process.argv.slice(i + 1)
@@ -150,8 +219,87 @@ try {
     case '--help':
       print(HELP)
       break
-    case 'prompt':
-      print(PROMPT)
+    case 'prompt': {
+      const name = process.argv[3] && !process.argv[3].startsWith('--') ? process.argv[3] : 'editing_guide'
+      try {
+        const r = await mcp('prompts/get', { name, arguments: arg('--goal') ? { goal: arg('--goal') } : {} })
+        const text = r?.messages?.map((m) => m.content?.text).join('\n\n')
+        print(`${text}\n\n—— 终端用法 ——\n工具名里的下划线换成连字符就是命令，例如 remove_silence → cutstudio remove-silence。\n看画面：cutstudio frame --at 毫秒 / cutstudio contact-sheet，输出 JPEG 路径，用读图工具查看。\n没有专用命令的工具：cutstudio call <工具名> '<json参数>'。\n`)
+      } catch (e) {
+        print(PROMPT_FALLBACK)
+        throw e
+      }
+      break
+    }
+    case 'skill':
+    case 'install-skill': {
+      const r = await mcp('prompts/get', { name: 'editing_guide', arguments: {} })
+      const guide = r?.messages?.map((m) => m.content?.text).join('\n\n') ?? ''
+      const body = `---
+name: cutstudio
+description: 用「剪辑台」剪辑视频：当用户要剪辑、粗剪、去口误、加字幕、配乐、做短视频，或提到剪辑台 / cutstudio / 当前工程时使用。通过 cutstudio 命令读写正在打开的剪辑台工程。
+---
+
+# 剪辑台剪辑指南
+
+所有操作通过终端命令 \`cutstudio\` 完成（剪辑台 App 必须开着）。工具名的下划线换成连字符就是命令，参数写成 \`--参数名 值\`（参数名用连字符，数组用逗号分隔）；也可以 \`cutstudio call <工具名> '<json>'\`。\`cutstudio tools\` 列出全部工具和说明。
+看画面：\`cutstudio frame --at 毫秒\` / \`cutstudio contact-sheet\` 输出 JPEG 路径，用 Read 工具查看图片。
+配方全文：\`cutstudio prompt <talking_head|shorts|vlog|interview|product>\`。
+
+${guide}
+`
+      if (cmd === 'skill') {
+        print(body)
+        break
+      }
+      const { mkdirSync, writeFileSync } = await import('node:fs')
+      const { join, resolve } = await import('node:path')
+      const root = resolve(process.argv[3] && !process.argv[3].startsWith('--') ? process.argv[3] : process.cwd())
+      const dir = join(root, '.claude', 'skills', 'cutstudio')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'SKILL.md'), body)
+      print(`已写入 ${join(dir, 'SKILL.md')}\n在该目录下启动 claude 即可自动加载剪辑指南。改了剪辑台的提示词后重新运行本命令。`)
+      break
+    }
+    case 'call': {
+      const name = process.argv[3]
+      if (!name) throw new Error("用法: cutstudio call <工具名> '<json参数>'")
+      print(await tool(name, process.argv[4] ? JSON.parse(process.argv[4]) : {}))
+      break
+    }
+    case 'tools': {
+      const specs = await toolSpecs()
+      const only = process.argv[3] && !process.argv[3].startsWith('--') ? process.argv[3].replace(/-/g, '_') : null
+      const list = only ? specs.filter((t) => t.name === only) : specs
+      if (!list.length) throw new Error(`没有工具 ${only}`)
+      print(
+        list
+          .map((t) => {
+            const props = Object.entries(t.inputSchema?.properties ?? {})
+            const req = new Set(t.inputSchema?.required ?? [])
+            const params = props.map(([k, v]) => `    ${paramLine(k, v)}${req.has(k) ? '  （必填）' : ''}`).join('\n')
+            return `cutstudio ${t.name.replace(/_/g, '-')}\n  ${t.description}${params ? '\n' + params : ''}`
+          })
+          .join('\n\n')
+      )
+      break
+    }
+    case 'index':
+      print(await tool('get_index'))
+      break
+    case 'frame': {
+      const at = arg('--at') ?? process.argv[3]
+      if (at == null || Number.isNaN(Number(at))) throw new Error('用法: cutstudio frame --at 毫秒')
+      print(await tool('get_frame', { atMs: Number(at), output: 'file', ...(arg('--width') ? { width: Number(arg('--width')) } : {}) }))
+      break
+    }
+    case 'contact-sheet':
+      print(await tool('contact_sheet', {
+        output: 'file',
+        ...(arg('--start') ? { startMs: Number(arg('--start')) } : {}),
+        ...(arg('--end') ? { endMs: Number(arg('--end')) } : {}),
+        ...(arg('--count') ? { count: Number(arg('--count')) } : {})
+      }))
       break
     case 'mcp':
       print({ url: MCP })
@@ -231,49 +379,58 @@ try {
       print(await tool('set_aspect', { aspect: process.argv[3] || '16:9' }))
       break
     case 'set-transition':
-      print(await tool('set_transition', { type: process.argv[3] || 'cross_dissolve', durationMs: 400 }))
+      print(
+        await tool('set_transition', {
+          type: process.argv[3] || 'none',
+          ...(process.argv[4] && !process.argv[4].startsWith('--') ? { durationMs: Number(process.argv[4]) } : {}),
+          ...clipArgs()
+        })
+      )
+      break
+    case 'list-transitions':
+      print(await tool('list_transitions'))
       break
     case 'fade-to-black':
       print(await tool('fade_to_black'))
       break
     case 'normalize-loudness':
-      print(await tool('normalize_loudness'))
+      print(await tool('normalize_loudness', arg('--lufs') ? { targetLufs: Number(arg('--lufs')) } : {}))
       break
     case 'duck-music':
       print(await tool('duck_music', { enabled: true }))
       break
     case 'apply-filter':
-      print(await tool('apply_filter', { name: process.argv[3] || 'vivid', ...(arg('--clip') ? { clipId: arg('--clip') } : {}) }))
+      print(await tool('apply_filter', { name: process.argv[3] || 'vivid', ...clipArgs() }))
       break
     case 'add-effect':
       print(await tool('add_effect', {
         type: process.argv[3] || 'blur',
         ...(arg('--amount') ? { amount: Number(arg('--amount')) } : {}),
-        ...(arg('--clip') ? { clipId: arg('--clip') } : {})
+        ...clipArgs()
       }))
       break
     case 'apply-lut':
       print(await tool('apply_lut', {
         name: process.argv[3] || 'warm',
         ...(arg('--path') ? { path: arg('--path') } : {}),
-        ...(arg('--clip') ? { clipId: arg('--clip') } : {})
+        ...clipArgs()
       }))
       break
     case 'list-effects':
       print(await tool('list_effects'))
       break
     case 'set-speed':
-      print(await tool('set_speed', { rate: Number(arg('--rate') || 1), ...(arg('--clip') ? { clipId: arg('--clip') } : {}) }))
+      print(await tool('set_speed', { rate: Number(arg('--rate') || 1), ...clipArgs() }))
       break
     case 'set-opacity':
-      print(await tool('set_opacity', { opacity: Number(arg('--value') || 1), ...(arg('--clip') ? { clipId: arg('--clip') } : {}) }))
+      print(await tool('set_opacity', { opacity: Number(arg('--value') || 1), ...clipArgs() }))
       break
     case 'set-transform':
       print(await tool('set_transform', {
         ...(arg('--scale') ? { scale: Number(arg('--scale')) } : {}),
         ...(arg('--x') ? { x: Number(arg('--x')) } : {}),
         ...(arg('--y') ? { y: Number(arg('--y')) } : {}),
-        ...(arg('--clip') ? { clipId: arg('--clip') } : {})
+        ...clipArgs()
       }))
       break
     case 'add-layer':
@@ -285,7 +442,7 @@ try {
       }))
       break
     case 'set-blend':
-      print(await tool('set_blend', { mode: process.argv[3] || 'normal', ...(arg('--clip') ? { clipId: arg('--clip') } : {}) }))
+      print(await tool('set_blend', { mode: process.argv[3] || 'normal', ...clipArgs() }))
       break
     case 'add-solid':
       print(await tool('add_solid', {
@@ -306,11 +463,11 @@ try {
       print(await tool('add_mask', {
         shape: process.argv[3] || 'ellipse',
         mode: arg('--mode') || 'add',
-        ...(arg('--clip') ? { clipId: arg('--clip') } : {})
+        ...clipArgs()
       }))
       break
     case 'remove-mask':
-      print(await tool('remove_mask', arg('--clip') ? { clipId: arg('--clip') } : {}))
+      print(await tool('remove_mask', clipArgs()))
       break
     case 'set-keyframe':
       print(await tool('set_keyframe', {
@@ -318,20 +475,20 @@ try {
         value: Number(arg('--value') ?? 1),
         ...(arg('--at') ? { atMs: Number(arg('--at')) } : {}),
         ease: arg('--ease') || 'ease_in_out',
-        ...(arg('--clip') ? { clipId: arg('--clip') } : {})
+        ...clipArgs()
       }))
       break
     case 'freeze-frame':
-      print(await tool('freeze_frame', arg('--clip') ? { clipId: arg('--clip') } : {}))
+      print(await tool('freeze_frame', clipArgs()))
       break
     case 'reverse-clip':
-      print(await tool('reverse_clip', arg('--clip') ? { clipId: arg('--clip') } : {}))
+      print(await tool('reverse_clip', clipArgs()))
       break
     case 'stabilize':
       print(await tool('stabilize', {
         enabled: true,
         ...(arg('--amount') ? { amount: Number(arg('--amount')) } : {}),
-        ...(arg('--clip') ? { clipId: arg('--clip') } : {})
+        ...clipArgs()
       }))
       break
     case 'key-color':
@@ -340,21 +497,21 @@ try {
         ...(arg('--tolerance') ? { tolerance: Number(arg('--tolerance')) } : {}),
         ...(arg('--spill') ? { spill: Number(arg('--spill')) } : {}),
         ...(arg('--edge') ? { edge: Number(arg('--edge')) } : {}),
-        ...(arg('--clip') ? { clipId: arg('--clip') } : {})
+        ...clipArgs()
       }))
       break
     case 'link-to-audio':
       print(await tool('link_to_audio', {
         prop: arg('--prop') || 'both',
         ...(arg('--amount') ? { amount: Number(arg('--amount')) } : {}),
-        ...(arg('--clip') ? { clipId: arg('--clip') } : {})
+        ...clipArgs()
       }))
       break
     case 'denoise-audio':
       print(await tool('denoise_audio', {
         enabled: true,
         ...(arg('--amount') ? { amount: Number(arg('--amount')) } : {}),
-        ...(arg('--clip') ? { clipId: arg('--clip') } : {})
+        ...clipArgs()
       }))
       break
     case 'animate-text':
@@ -384,31 +541,31 @@ try {
       print(await tool('remove_filler'))
       break
     case 'duplicate-clip':
-      print(await tool('duplicate_clip', arg('--clip') ? { clipId: arg('--clip') } : {}))
+      print(await tool('duplicate_clip', clipArgs()))
       break
     case 'detach-audio':
-      print(await tool('detach_audio', arg('--clip') ? { clipId: arg('--clip') } : {}))
+      print(await tool('detach_audio', clipArgs()))
       break
     case 'auto-enhance':
       print(await tool('auto_enhance'))
       break
     case 'reframe':
-      print(await tool('reframe', { aspect: '9:16' }))
+      print(await tool('reframe', { aspect: process.argv[3] && !process.argv[3].startsWith('--') ? process.argv[3] : '9:16' }))
       break
     case 'add-title':
       print(await tool('add_title', { text: arg('--text') || '标题', startMs: Number(arg('--start') || 0) }))
       break
     case 'flip':
-      print(await tool('flip', arg('--clip') ? { clipId: arg('--clip') } : {}))
+      print(await tool('flip', clipArgs()))
       break
     case 'slow-motion':
-      print(await tool('slow_motion', { rate: Number(arg('--rate') || 0.5), ...(arg('--clip') ? { clipId: arg('--clip') } : {}) }))
+      print(await tool('slow_motion', { rate: Number(arg('--rate') || 0.5), ...clipArgs() }))
       break
     case 'jump-cut':
       print(await tool('jump_cut'))
       break
     case 'mute':
-      print(await tool('mute_clip', arg('--clip') ? { clipId: arg('--clip') } : {}))
+      print(await tool('mute_clip', clipArgs()))
       break
     case 'delete-media': {
       const id = process.argv[3]
@@ -416,8 +573,14 @@ try {
       print(await tool('delete_asset', { assetId: id }))
       break
     }
-    default:
-      throw new Error(`未知命令: ${cmd}\n运行 cutstudio help`)
+    default: {
+      // 通用映射：cutstudio cut-sentences --sentence-ids a,b --pad-ms 60 → cut_sentences {sentenceIds:[a,b], padMs:60}
+      const name = cmd.replace(/-/g, '_')
+      const list = await mcp('tools/list', {})
+      const spec = list?.tools?.find((t) => t.name === name)
+      if (!spec) throw new Error(`未知命令: ${cmd}\n运行 cutstudio help，或 cutstudio tools 查看全部工具`)
+      print(await tool(name, flagsToArgs(spec.inputSchema?.properties ?? {})))
+    }
   }
 } catch (e) {
   process.stderr.write((e instanceof Error ? e.message : String(e)) + '\n')

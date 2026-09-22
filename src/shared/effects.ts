@@ -261,9 +261,4 @@ export function applyEffectsCanvas(
   }
 }
 
-export function xfadeName(type: string): string | null {
-  if (type === 'cross_dissolve') return 'fade'
-  if (type === 'fade_white') return 'fadewhite'
-  if (type === 'push') return 'slideright'
-  return null
-}
+export { xfadeName } from './transition'

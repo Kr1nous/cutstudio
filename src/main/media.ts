@@ -4,6 +4,7 @@ import { store } from './core'
 import { applySourceFrame, shouldAdoptSourceFrame } from '../shared/compose'
 import { probeMedia, writeThumb } from './render/ffmpeg'
 import { analyzeMediaFile } from './render/wave'
+import { queueAssetAnalysis } from './analysis/background'
 
 export { exportTimeline, renderTimeline, makeProxy, addRenderJob } from './render/export'
 export { renderFrame } from './render/frame'
@@ -42,13 +43,17 @@ export async function probeAssetFile(assetId: string): Promise<ReturnType<typeof
     try {
       await store.updateAssetMeta(assetId, {
         ...meta,
-        index: await analyzeMediaFile(asset.path, meta.durationMs ?? asset.durationMs)
+        index: await analyzeMediaFile(asset.path, meta.durationMs ?? asset.durationMs, {
+          scenes: (meta.durationMs ?? asset.durationMs) <= 120_000
+        })
       })
+      queueAssetAnalysis(store, [assetId])
       return store.getState()
     } catch {
       /* continue with duration/thumb only */
     }
   }
+  if (asset.kind === 'video' || asset.kind === 'audio') queueAssetAnalysis(store, [assetId])
   if (Object.keys(meta).length) await store.updateAssetMeta(assetId, meta)
   else if (w && h) {
     await store.save()

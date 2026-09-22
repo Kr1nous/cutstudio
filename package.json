@@ -1,7 +1,7 @@
 {
   "name": "cut-studio",
   "productName": "剪辑台",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "AI 接管剪辑、人类微调的 macOS 剪辑软件",
   "author": "Kr1nous",
   "contributors": [
@@ -26,7 +26,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "mcp:stdio": "npm run build:sidecar && node ./out/sidecar/index.js",
-    "verify:compose": "tsx src/main/render/verify.ts"
+    "verify:compose": "tsx src/main/render/verify.ts",
+    "eval": "tsx src/main/eval/run.ts"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

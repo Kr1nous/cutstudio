@@ -1,16 +1,21 @@
 import { writeFile } from 'node:fs/promises'
+import { textScale } from '../../shared/text'
 import { join } from 'node:path'
 import { ffmpegInterp, hasAnim } from '../../shared/anim'
 import { even, dissolveOverlapMs, ffmpegBlendMode } from '../../shared/compose'
 import { glowSigma, hasGlow, simpleEffectFfmpeg, xfadeName } from '../../shared/effects'
 import { audioGlowFfmpeg, denoiseFfmpeg, volumeFilter } from '../../shared/audio'
+import { voiceFfmpeg } from '../../shared/voice'
 import { videoFilterFfmpeg } from '../../shared/fx'
 import { keyFfmpeg, stabilizeFfmpeg } from '../../shared/key'
 import { axisScale, maskFfmpeg } from '../../shared/mask'
+import { DEFAULT_BOX_COLOR, DEFAULT_BOX_OPACITY, DEFAULT_HIGHLIGHT, assAlpha, karaokeLines, keywordRuns, subtitlePreset, wrapSubtitleText } from '../../shared/subtitle'
 import {
   type MediaAsset,
   type Project,
   type ProjectSettings,
+  type SubtitleCue,
+  type SubtitleStyle,
   type TimelineClip,
   clipBlend,
   clipFx,
@@ -174,10 +179,37 @@ function assTime(ms: number): string {
 
 export async function writeAss(project: Project, dir: string, width: number, height: number): Promise<string | null> {
   if (!project.timeline.subtitles.length) return null
+  const path = join(dir, 'subs.ass')
+  await writeFile(path, assDocument(project, width, height), 'utf8')
+  return path
+}
+
+/** 生成 ASS 文本；按 subtitleStyle.preset 输出描边 / 底框 / 卡拉 OK / 关键词高亮。 */
+export function assDocument(project: Project, width: number, height: number): string {
   const style = project.subtitleStyle
+  const preset = subtitlePreset(style)
   const align = style.position === 'top' ? 8 : style.position === 'center' ? 5 : 2
   const marginV = style.position === 'center' ? 0 : Math.round(height * 0.08)
-  const fontSize = Math.round((style.fontSize || 42) * (width / 1920))
+  const fontSize = Math.round((style.fontSize || 42) * textScale(width, height))
+  const color = style.color || '#ffffff'
+  const highlight = style.highlightColor || DEFAULT_HIGHLIGHT
+  let primary = assColor(color)
+  let secondary = '&H000000FF'
+  let outline = assColor(style.stroke || '#000000')
+  let back = '&H80000000'
+  let borderStyle = 1
+  let outlineW = 2.2
+  if (preset === 'boxed') {
+    // BorderStyle 3：libass 用 OutlineColour 画底框，Outline 为内边距
+    borderStyle = 3
+    outline = assColor(style.boxColor || DEFAULT_BOX_COLOR, assAlpha(style.boxOpacity ?? DEFAULT_BOX_OPACITY))
+    back = outline
+    outlineW = Math.max(4, Math.round(fontSize * 0.22))
+  } else if (preset === 'karaoke') {
+    // \kf 从 Secondary 填充到 Primary：已读 = 高亮色
+    primary = assColor(highlight)
+    secondary = assColor(color)
+  }
   const lines = [
     '[Script Info]',
     'ScriptType: v4.00+',
@@ -187,19 +219,56 @@ export async function writeAss(project: Project, dir: string, width: number, hei
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: Default,PingFang SC,${fontSize},${assColor(style.color || '#ffffff')},&H000000FF,${assColor(style.stroke || '#000000')},&H80000000,0,0,0,0,100,100,0,0,1,2.2,0,${align},40,40,${marginV},1`,
+    `Style: Default,PingFang SC,${fontSize},${primary},${secondary},${outline},${back},0,0,0,0,100,100,0,0,${borderStyle},${outlineW},0,${align},40,40,${marginV},1`,
     '',
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text'
   ]
-  for (const cue of project.timeline.subtitles) {
-    lines.push(
-      `Dialogue: 0,${assTime(cue.startMs)},${assTime(cue.endMs)},Default,,0,0,0,,${escapeAss(cue.text)}`
-    )
+  for (const raw of project.timeline.subtitles) {
+    // 超宽的行按估算宽度折行（和抽帧预览、应用内预览一致），不依赖 libass 自动换行
+    const cue = { ...raw, text: wrapSubtitleText(raw.text, style, width, height) }
+    lines.push(`Dialogue: 0,${assTime(cue.startMs)},${assTime(cue.endMs)},Default,,0,0,0,,${assCueText(cue, style)}`)
   }
-  const path = join(dir, 'subs.ass')
-  await writeFile(path, lines.join('\n'), 'utf8')
-  return path
+  return lines.join('\n')
+}
+
+function assCueText(cue: SubtitleCue, style: SubtitleStyle): string {
+  const preset = subtitlePreset(style)
+  if (preset === 'karaoke') {
+    const kl = karaokeLines(cue)
+    if (kl) {
+      let t = cue.startMs
+      const parts: string[] = []
+      kl.forEach((runs, li) => {
+        if (li > 0) parts.push('\\N')
+        runs.forEach((r, ri) => {
+          if (r.startMs == null) {
+            parts.push(escapeAss(r.text))
+            return
+          }
+          if (r.startMs > t + 10) parts.push(`{\\k${Math.round((r.startMs - t) / 10)}}`)
+          const nextStart = runs[ri + 1]?.startMs ?? kl[li + 1]?.[0]?.startMs
+          const end = Math.max(r.endMs ?? r.startMs, Math.min(nextStart ?? r.endMs ?? r.startMs, cue.endMs))
+          const cs = Math.max(1, Math.round((end - Math.max(t, r.startMs)) / 10))
+          parts.push(`{\\kf${cs}}${escapeAss(r.text)}`)
+          t = Math.max(t, r.startMs) + cs * 10
+        })
+      })
+      return parts.join('')
+    }
+  }
+  if (preset === 'keyword' && style.keywords?.length) {
+    const hl = assColor(style.highlightColor || DEFAULT_HIGHLIGHT)
+    return cue.text
+      .split('\n')
+      .map((line) =>
+        keywordRuns(line, style.keywords)
+          .map((r) => (r.hit ? `{\\c&H${hl.slice(-6)}&\\fscx115\\fscy115}${escapeAss(r.text)}{\\r}` : escapeAss(r.text)))
+          .join('')
+      )
+      .join('\\N')
+  }
+  return escapeAss(cue.text)
 }
 
 function escapeFilterPath(p: string): string {
@@ -228,9 +297,12 @@ export function buildGraph(
     streams: Map<string, StreamInfo>
     assPath?: string | null
     bakedText?: Map<string, { path: string }>
+    /** 本机 ffmpeg 有的滤镜；给了就跳过人声增强里没有的滤镜 */
+    filters?: Set<string>
   }
 ): FilterGraph {
   const { width, height, fps, alpha, streams } = opts
+  const hasFilter = (f: string) => !opts.filters || opts.filters.has(f)
   const durationMs = Math.max(1, timelineDurationMs(project.timeline))
   const inputs: GraphInput[] = []
   const filters: string[] = []
@@ -416,6 +488,7 @@ export function buildGraph(
       ...speedFilters,
       `aformat=sample_fmts=fltp:sample_rates=${project.settings.sampleRate || 48000}:channel_layouts=stereo`,
       ...denoiseFfmpeg(fx),
+      ...voiceFfmpeg(fx, hasFilter),
       volumeFilter(item.clip),
       fadeIn > 0 ? `afade=t=in:st=0:d=${sec(fadeIn)}` : null,
       fadeOut > 0 ? `afade=t=out:st=${sec(item.clip.durationMs - fadeOut)}:d=${sec(fadeOut)}` : null
@@ -442,11 +515,11 @@ export function buildGraph(
     const aOut = `ax${i}`
     if (overlap > 0.001) {
       const offset = accS - overlap
-      const xf = xfadeName(fx.transitionOut.type) || 'fade'
+      const xf = xfadeName(fx.transitionOut.type) || 'fadeslow'
       filters.push(
         `[${vLast}][v${i}]xfade=transition=${xf}:duration=${overlap.toFixed(3)}:offset=${offset.toFixed(3)}[${vOut}]`
       )
-      filters.push(`[${aLast}][a${i}]acrossfade=d=${overlap.toFixed(3)}[${aOut}]`)
+      filters.push(`[${aLast}][a${i}]acrossfade=d=${overlap.toFixed(3)}:c1=cub:c2=cub[${aOut}]`)
       accS = accS + story[i].clip.durationMs / 1000 - overlap
     } else {
       filters.push(`[${vLast}][v${i}]concat=n=2:v=1:a=0[${vOut}]`)
@@ -561,31 +634,61 @@ export function buildGraph(
 
   let aFinal: string | null = aLast
   if (music.length) {
-    const duck = project.timeline.duck?.enabled ? project.timeline.duck.ratio : 1
+    const duckOn = Boolean(project.timeline.duck?.enabled)
     const musicLabels: string[] = []
+    const dialogLabels: string[] = []
     music.forEach((item, i) => {
       if (item.audioIndex == null) return
-      const label = `m${i}`
+      const dialog = item.clip.role === 'dialog'
+      const label = dialog ? `d${i}` : `m${i}`
       const delay = Math.max(0, Math.round(item.clip.startMs))
       const fx = clipFx(item.clip)
       const extra = chain([
         `aformat=sample_fmts=fltp:sample_rates=${project.settings.sampleRate || 48000}:channel_layouts=stereo`,
         ...denoiseFfmpeg(fx),
-        volumeFilter(item.clip, duck),
+        ...(dialog ? voiceFfmpeg(fx, hasFilter) : []),
+        volumeFilter(item.clip),
         `adelay=${delay}|${delay}`
       ])
       filters.push(
         `[${item.audioIndex}:a]atrim=start=${sec(item.clip.inMs)}:end=${sec(item.clip.outMs)},asetpts=PTS-STARTPTS,${extra}[${label}]`
       )
-      musicLabels.push(label)
+      ;(dialog ? dialogLabels : musicLabels).push(label)
     })
+    const voiceIns = [aLast, ...dialogLabels]
+    let musicBus: string | null = null
     if (musicLabels.length) {
-      const mixIns = [aLast, ...musicLabels].map((l) => `[${l}]`).join('')
+      musicBus = 'mbus'
       filters.push(
-        `${mixIns}amix=inputs=${1 + musicLabels.length}:duration=first:dropout_transition=0:normalize=0[aout]`
+        musicLabels.length > 1
+          ? `${musicLabels.map((l) => `[${l}]`).join('')}amix=inputs=${musicLabels.length}:duration=longest:dropout_transition=0:normalize=0[${musicBus}]`
+          : `[${musicLabels[0]}]anull[${musicBus}]`
+      )
+    }
+    if (musicBus && duckOn) {
+      // 真正的闪避：只在人声出现时压低音乐（人声做侧链），而不是整首歌一直小声。
+      const ratio = Math.min(20, Math.max(2, 1 / Math.max(0.05, project.timeline.duck?.ratio ?? 0.28)))
+      const voice = voiceIns.length > 1 ? 'vbus' : aLast
+      if (voiceIns.length > 1) {
+        filters.push(`${voiceIns.map((l) => `[${l}]`).join('')}amix=inputs=${voiceIns.length}:duration=first:dropout_transition=0:normalize=0[vbus]`)
+      }
+      filters.push(`[${voice}]asplit=2[vmain][vkey]`)
+      filters.push(`[${musicBus}][vkey]sidechaincompress=threshold=0.015:ratio=${ratio.toFixed(2)}:attack=30:release=450:makeup=1[mduck]`)
+      filters.push(`[vmain][mduck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]`)
+      aFinal = 'aout'
+    } else if (musicBus || dialogLabels.length) {
+      const mixIns = [...voiceIns, ...(musicBus ? [musicBus] : [])].map((l) => `[${l}]`).join('')
+      filters.push(
+        `${mixIns}amix=inputs=${voiceIns.length + (musicBus ? 1 : 0)}:duration=first:dropout_transition=0:normalize=0[aout]`
       )
       aFinal = 'aout'
     }
+  }
+
+  if (aFinal) {
+    // 母线限幅到 -1 dBTP：响度统一后提高的音量不会削波。
+    filters.push(`[${aFinal}]alimiter=limit=0.891:attack=5:release=60:level=disabled[amaster]`)
+    aFinal = 'amaster'
   }
 
   return {

@@ -14,6 +14,25 @@ export function runFfmpeg(cmd: string, args: string[]): Promise<{ code: number; 
   })
 }
 
+const filterCache = new Map<string, Set<string>>()
+
+/** ffmpeg 是否编译了某个滤镜（比如 ass 需要 libass，Homebrew 精简版没有）。 */
+export async function ffmpegHasFilter(ffmpeg: string, name: string): Promise<boolean> {
+  let set = filterCache.get(ffmpeg)
+  if (!set) {
+    const r = await runFfmpeg(ffmpeg, ['-hide_banner', '-filters'])
+    set = new Set(
+      r.stdout
+        .toString()
+        .split('\n')
+        .map((line) => line.trim().split(/\s+/)[1])
+        .filter((x): x is string => Boolean(x))
+    )
+    filterCache.set(ffmpeg, set)
+  }
+  return set.has(name)
+}
+
 export async function findFfmpeg(): Promise<string | null> {
   const home = process.env.HOME || ''
   const candidates = [

@@ -9,7 +9,7 @@ import type { Project } from '../../shared/types'
 import { findFfmpeg, findFfprobe, runFfmpeg } from './ffmpeg'
 import { canvasSize } from './graph'
 import { collectStreams } from './export'
-import { bakeTextFrame } from './textpng'
+import { bakeSubtitleFrame, bakeTextFrame } from './textpng'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -23,7 +23,12 @@ function ffColor(hex: string): string {
   return '0x000000'
 }
 
-export async function renderFrame(project: Project, timeMs: number, preset = '1080p'): Promise<Buffer> {
+export type RenderFrameOptions = {
+  /** 叠加该时刻的字幕（按 subtitleStyle 绘制，近似导出的 ASS 效果）。默认 false。 */
+  subtitles?: boolean
+}
+
+export async function renderFrame(project: Project, timeMs: number, preset = '1080p', opts: RenderFrameOptions = {}): Promise<Buffer> {
   const ffmpeg = await findFfmpeg()
   if (!ffmpeg) throw new Error('本机没有 ffmpeg')
   const ffprobe = await findFfprobe(ffmpeg)
@@ -122,6 +127,8 @@ export async function renderFrame(project: Project, timeMs: number, preset = '10
               : null
       filters.push(
         `[${idx}:v]${chain([
+          // -ss 之后首帧时间戳不一定是 0，和 0.04 秒底色 overlay 时会先吐出一帧纯黑。
+          'setpts=PTS-STARTPTS',
           'format=rgba',
           crop,
           rot,
@@ -163,6 +170,16 @@ export async function renderFrame(project: Project, timeMs: number, preset = '10
     last = next
   }
 
+  if (opts.subtitles) {
+    const png = join(tmpdir(), `cut-sub-${process.pid}-${Math.round(timeMs)}.png`)
+    if (await bakeSubtitleFrame(project, width, height, timeMs, png)) {
+      args.push('-loop', '1', '-t', '0.04', '-i', png)
+      const idx = inputIndex++
+      filters.push(`[${idx}:v]format=rgba[subs]`)
+      filters.push(`[${last}][subs]overlay=0:0:format=auto[withsubs]`)
+      last = 'withsubs'
+    }
+  }
   filters.push(`[${last}]format=rgba[vout]`)
   args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-frames:v', '1', '-f', 'image2', '-c:v', 'png', 'pipe:1')
 

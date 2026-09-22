@@ -32,11 +32,19 @@ const CATS: { id: string; label: string; items: Item[] }[] = [
     label: '转场',
     items: [
       { label: '硬切', name: 'set_transition', args: { type: 'none', durationMs: 0 } },
-      { label: '交叉溶解', name: 'set_transition', args: { type: 'cross_dissolve', durationMs: 400 } },
-      { label: '长溶解', name: 'set_transition', args: { type: 'cross_dissolve', durationMs: 900 } },
+      { label: '柔和溶解', name: 'set_transition', args: { type: 'cross_dissolve', durationMs: 700 } },
+      { label: '长溶解', name: 'set_transition', args: { type: 'cross_dissolve', durationMs: 1100 } },
+      { label: '颗粒溶解', name: 'set_transition', args: { type: 'dissolve', durationMs: 700 } },
+      { label: '暗场', name: 'set_transition', args: { type: 'dip_black', durationMs: 800 } },
+      { label: '淡出白', name: 'set_transition', args: { type: 'fade_white', durationMs: 700 } },
+      { label: '柔擦', name: 'set_transition', args: { type: 'smooth_wipe', durationMs: 700 } },
+      { label: '上擦', name: 'set_transition', args: { type: 'wipe_up', durationMs: 700 } },
+      { label: '左滑', name: 'set_transition', args: { type: 'slide_left', durationMs: 650 } },
+      { label: '右推', name: 'set_transition', args: { type: 'push', durationMs: 650 } },
+      { label: '推近', name: 'set_transition', args: { type: 'zoom', durationMs: 750 } },
+      { label: '圆形', name: 'set_transition', args: { type: 'iris', durationMs: 700 } },
+      { label: '模糊过渡', name: 'set_transition', args: { type: 'blur_mix', durationMs: 700 } },
       { label: '淡出黑', name: 'fade_to_black', args: { durationMs: 800 } },
-      { label: '淡出白', name: 'set_transition', args: { type: 'fade_white', durationMs: 400 } },
-      { label: '推', name: 'set_transition', args: { type: 'push', durationMs: 400 } },
       { label: '淡入', name: 'fade_from_black', args: { durationMs: 800 } }
     ]
   },

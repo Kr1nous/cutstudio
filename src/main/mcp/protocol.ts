@@ -1,6 +1,8 @@
 import { store } from '../core'
 import { ALL_TOOLS, executeTool } from '../ai/tools'
 import { timelineDurationMs } from '../../shared/types'
+import { mcpInstructions, RECIPES, recipeText, fullPrompt } from '../../shared/prompts'
+import { isVisionResult } from '../ai/vision'
 
 interface JsonRpcReq {
   jsonrpc?: string
@@ -17,7 +19,7 @@ function err(id: JsonRpcReq['id'], code: number, message: string) {
   return { jsonrpc: '2.0', id: id ?? null, error: { code, message } }
 }
 
-const SERVER_INFO = { name: 'cut-studio', title: '剪辑台', version: '0.1.0' }
+const SERVER_INFO = { name: 'cut-studio', title: '剪辑台', version: '1.2.0' }
 
 function toolList() {
   return {
@@ -33,12 +35,12 @@ function toolList() {
       },
       {
         name: 'get_timeline',
-        description: '只读取故事线和独立字幕轨。',
+        description: '只读取原始时间线 JSON（含全部效果默认值，较长）。一般用 get_project。',
         inputSchema: { type: 'object', properties: {}, additionalProperties: false }
       },
       {
         name: 'import_media',
-        description: '把本机已录制的影片/音频/图片导入当前项目。paths 为绝对路径。',
+        description: '把本机已录制的影片/音频/图片导入当前项目。paths 为绝对路径。导入后会在后台分析静音、镜头、响度和转写，稍后用 get_index 查看。',
         inputSchema: {
           type: 'object',
           properties: { paths: { type: 'array', items: { type: 'string' } } },
@@ -72,8 +74,9 @@ export async function handleMcp(body: JsonRpcReq): Promise<unknown> {
       case 'initialize':
         return ok(id, {
           protocolVersion: '2025-03-26',
-          capabilities: { tools: { listChanged: true }, resources: {} },
-          serverInfo: SERVER_INFO
+          capabilities: { tools: { listChanged: true }, resources: {}, prompts: {} },
+          serverInfo: SERVER_INFO,
+          instructions: mcpInstructions()
         })
       case 'notifications/initialized':
       case 'notifications/cancelled':
@@ -85,9 +88,28 @@ export async function handleMcp(body: JsonRpcReq): Promise<unknown> {
       case 'tools/call': {
         const name = String(params?.name ?? '')
         const args = (params?.arguments as Record<string, unknown>) ?? {}
-        const result = await callTool(name, args)
+        let result: unknown
+        try {
+          result = await callTool(name, args)
+        } catch (e) {
+          // 工具错误作为结果返回（isError），模型才能看到原因并自己修正参数。
+          return ok(id, {
+            content: [{ type: 'text', text: e instanceof Error ? e.message : String(e) }],
+            isError: true
+          })
+        }
+        if (isVisionResult(result)) {
+          const { images, ...meta } = result
+          return ok(id, {
+            content: [
+              { type: 'text', text: JSON.stringify(meta) },
+              ...images.map((img) => ({ type: 'image', data: img.data, mimeType: img.mime }))
+            ],
+            structuredContent: meta
+          })
+        }
         return ok(id, {
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          content: [{ type: 'text', text: JSON.stringify(result) }],
           structuredContent: result
         })
       }
@@ -120,13 +142,25 @@ export async function handleMcp(body: JsonRpcReq): Promise<unknown> {
       case 'prompts/list':
         return ok(id, {
           prompts: [
-            {
-              name: 'cut_to_duration',
-              description: '把已录制影片剪到指定秒数并写字幕',
-              arguments: [{ name: 'seconds', description: '目标秒数', required: true }]
-            }
+            { name: 'editing_guide', description: '剪辑台完整剪辑说明：流程、剪辑语法、配方列表' },
+            ...Object.entries(RECIPES).map(([name, r]) => ({
+              name,
+              description: `${r.title}：${r.description}`,
+              arguments: [{ name: 'goal', description: '补充要求，例如目标时长、平台', required: false }]
+            }))
           ]
         })
+      case 'prompts/get': {
+        const name = String(params?.name ?? '')
+        const goal = String((params?.arguments as Record<string, unknown> | undefined)?.goal ?? '').trim()
+        const body = name === 'editing_guide' ? fullPrompt() : recipeText(name)
+        if (!body) return err(id, -32602, `未知 prompt: ${name}`)
+        const text = name === 'editing_guide' ? body : `按下面的配方剪辑当前项目。${goal ? `\n补充要求：${goal}` : ''}\n\n${body}`
+        return ok(id, {
+          description: name,
+          messages: [{ role: 'user', content: { type: 'text', text } }]
+        })
+      }
       default:
         if (method?.startsWith('notifications/')) return null
         return err(id, -32601, `Method not found: ${method}`)
