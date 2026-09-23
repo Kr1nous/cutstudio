@@ -6,15 +6,9 @@ import { axisScale, layerBox } from '../../shared/mask'
 import { SIDE_MARGIN, estimateTextWidthPx, maxCharsForStyle, subtitleAvailablePx, subtitleLineWidthPx } from '../../shared/subtitle'
 import { clipText, textScale } from '../../shared/text'
 import { clipFx, clipKind } from '../../shared/types'
-import type { Project, TimelineClip } from '../../shared/types'
+import type { Project, ReviewIssue, TimelineClip } from '../../shared/types'
 
-export interface ReviewIssue {
-  severity: 'error' | 'warn' | 'info'
-  code: string
-  atMs?: number
-  clipId?: string
-  message: string
-}
+export type { ReviewIssue }
 
 export interface ReviewOptions {
   /** 每行最大字数；默认竖屏 16、横屏 22。 */

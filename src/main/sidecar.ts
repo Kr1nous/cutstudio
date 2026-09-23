@@ -15,9 +15,11 @@ import {
   setTerminalSink,
   startTerminal,
   stopTerminal,
+  terminalStatus,
   writeTerminal
 } from './terminal'
-import type { AppSettings, TimelineOp } from '../shared/types'
+import type { AppSettings, ExportOptions, TimelineOp } from '../shared/types'
+import { cancelExport, lastRenderWarnings } from './render/export'
 
 const clients = new Set<http.ServerResponse>()
 
@@ -195,10 +197,30 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     sendJson(res, 200, store.getState())
     return
   }
+  if (path === '/project/close' && method === 'POST') {
+    await store.closeProject()
+    sendJson(res, 200, store.getState())
+    return
+  }
+  if (path === '/projects/recent' && method === 'GET') {
+    const recent = (store.settings.recentProjects ?? []).map((r) => ({ ...r, exists: existsSync(join(r.path, 'project.json')) }))
+    sendJson(res, 200, recent)
+    return
+  }
+  if (path === '/projects/forget' && method === 'POST') {
+    const body = await json(req)
+    await store.forgetRecent(String(body.path ?? ''))
+    sendJson(res, 200, { ok: true })
+    return
+  }
   if (path === '/project/rename' && method === 'POST') {
     const body = await json(req)
     const p = store.requireProject()
     p.name = String(body.name ?? p.name)
+    if (store.projectPath) {
+      store.rememberProject(store.projectPath, p.name)
+      await store.saveSettings()
+    }
     await store.save()
     store.broadcast()
     sendJson(res, 200, store.getState())
@@ -233,7 +255,17 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   }
   if (path === '/media/export' && method === 'POST') {
     const body = await json(req)
-    sendJson(res, 200, { path: await exportTimeline(String(body.preset ?? '1080p')) })
+    const opts = body as ExportOptions
+    const out = await exportTimeline(String(body.preset ?? '1080p'), undefined, {
+      rangeMs: opts.rangeMs,
+      subtitles: opts.subtitles,
+      outPath: opts.outPath
+    })
+    sendJson(res, 200, { path: out, warnings: lastRenderWarnings })
+    return
+  }
+  if (path === '/media/export/cancel' && method === 'POST') {
+    sendJson(res, 200, { cancelled: cancelExport() })
     return
   }
   if (path === '/compose/frame' && method === 'GET') {
@@ -255,12 +287,14 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     return
   }
   if (path === '/timeline/undo' && method === 'POST') {
-    await store.undoLast()
+    const body = await json(req)
+    await store.undoSteps(Number(body.steps) || 1)
     sendJson(res, 200, store.getState())
     return
   }
   if (path === '/timeline/redo' && method === 'POST') {
-    await store.redoLast()
+    const body = await json(req)
+    await store.redoSteps(Number(body.steps) || 1)
     sendJson(res, 200, store.getState())
     return
   }
@@ -302,6 +336,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     sendJson(res, 200, await restartTerminal(Number(body.cols) || 80, Number(body.rows) || 24))
     return
   }
+  if (path === '/terminal/status' && method === 'GET') {
+    sendJson(res, 200, terminalStatus())
+    return
+  }
   if (path === '/terminal/write' && method === 'POST') {
     const body = await json(req)
     writeTerminal(String(body.data ?? ''))
@@ -332,6 +370,7 @@ async function main(): Promise<void> {
     }
   }
   store.onChange((state) => emit('state', state))
+  store.onEvent((name, data) => emit(name, data))
   setTerminalSink({
     send(channel, payload) {
       if (channel === 'terminal:data') emit('terminal-data', payload)

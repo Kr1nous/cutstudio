@@ -19,7 +19,8 @@ export function SettingsModal({
   return (
     <div className="modal-back" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>MCP / 终端</h2>
+        <h2>设置</h2>
+        <h3>AI 接入</h3>
         <p style={{ color: 'var(--muted)', marginTop: 0 }}>
           AI 只通过本机 MCP 或底部终端接入。把下面配置放到 Cursor / Claude Desktop 等客户端；或在终端里运行 grok / claude / codex，用 cutstudio 命令改当前工程。
         </p>
@@ -29,7 +30,7 @@ export function SettingsModal({
         <p style={{ color: 'var(--muted)', fontSize: 12 }}>
           终端里先执行 <code>cutstudio prompt</code>，再用 <code>cutstudio help</code> 查看可直接调用的工具。
         </p>
-        <h2 style={{ marginTop: 20 }}>语音转写</h2>
+        <h3>语音转写</h3>
         <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
           <input
             type="checkbox"

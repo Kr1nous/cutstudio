@@ -18,6 +18,7 @@ import { clipText, textScale, visibleText } from '@shared/text'
 import { volumeAt } from '@shared/audio'
 import { applyWarmthCanvas, videoFilterCss } from '@shared/fx'
 import { formatTimecode, mediaUrl } from '../lib/format'
+import { Icon } from './Icon'
 
 type VisualEl = HTMLVideoElement | HTMLImageElement
 
@@ -376,6 +377,8 @@ export function Viewer({
   timeline,
   playheadMs,
   playing,
+  rate = 1,
+  durationMs = 0,
   onToggle,
   onSeek,
   subtitleStyle,
@@ -388,6 +391,9 @@ export function Viewer({
   timeline: Timeline
   playheadMs: number
   playing: boolean
+  /** 播放倍速（J/K/L）。 */
+  rate?: number
+  durationMs?: number
   onToggle: () => void
   onSeek: (ms: number) => void
   subtitleStyle?: SubtitleStyle
@@ -447,6 +453,8 @@ export function Viewer({
   const activeMaskIdRef = useRef(activeMaskId)
   activeMaskIdRef.current = activeMaskId
   const clockRef = useRef({ originWall: 0, originMs: 0 })
+  const rateRef = useRef(rate)
+  rateRef.current = rate
 
   const layers = useMemo(() => layersAt(timeline, playheadMs), [timeline, playheadMs])
   layersRef.current = layers
@@ -480,7 +488,7 @@ export function Viewer({
 
   function currentTimeMs() {
     if (playingRef.current) {
-      return clockRef.current.originMs + (performance.now() - clockRef.current.originWall)
+      return clockRef.current.originMs + (performance.now() - clockRef.current.originWall) * rateRef.current
     }
     return playheadRef.current
   }
@@ -719,7 +727,7 @@ export function Viewer({
         continue
       }
       try {
-        el.playbackRate = fx.speed || 1
+        el.playbackRate = (fx.speed || 1) * rateRef.current
       } catch {
         /* ignore */
       }
@@ -753,7 +761,7 @@ export function Viewer({
       const duck = clip.role !== 'dialog' && speaking ? tl.duck!.ratio : 1
       try {
         el.volume = Math.min(1, Math.max(0, volumeAt(clip, t) * duck))
-        el.playbackRate = fx.speed || 1
+        el.playbackRate = (fx.speed || 1) * rateRef.current
       } catch {
         /* ignore */
       }
@@ -871,7 +879,7 @@ export function Viewer({
         if (el instanceof HTMLMediaElement && !el.paused) el.pause()
       }
     }
-  }, [playing])
+  }, [playing, rate])
 
   useEffect(() => {
     setLiveMasks(null)
@@ -1071,12 +1079,6 @@ export function Viewer({
 
   return (
     <section className="panel viewer">
-      <div className="panel-h">
-        <span>预览</span>
-        <span>
-          {width}×{height}
-        </span>
-      </div>
       <div className="viewer-stage" ref={stageRef}>
         {timeline.storyline.length || timeline.overlays.length ? (
           <canvas
@@ -1090,20 +1092,32 @@ export function Viewer({
             }}
           />
         ) : (
-          <div className="viewer-empty" onClick={onToggle}>
-            导入素材或让 AI 生成时间线
+          <div className="viewer-empty">
+            <b>还没有画面</b>
+            <span>
+              导入素材后双击加到主线，或在底部终端启动 claude 说「帮我粗剪」
+            </span>
           </div>
         )}
         <div ref={hostRef} className="comp-media" aria-hidden />
       </div>
       <div className="transport">
-        <button className="btn ghost" onClick={() => onSeek(Math.max(0, playheadMs - 1000))}>
-          −1s
-        </button>
-        <button className="btn primary" onClick={onToggle}>
-          {playing ? '暂停' : '播放'}
-        </button>
         <span className="tc">{formatTimecode(playheadMs, true)}</span>
+        <div className="transport-btns">
+          <button type="button" className="icon-btn" title="上一帧 ←" onClick={() => onSeek(Math.max(0, playheadMs - 1000 / (settings.fps || 30)))}>
+            <Icon name="prev" />
+          </button>
+          <button type="button" className="play-btn" title="播放 / 暂停 空格" onClick={onToggle}>
+            <Icon name={playing ? 'pause' : 'play'} size={18} />
+          </button>
+          <button type="button" className="icon-btn" title="下一帧 →" onClick={() => onSeek(Math.min(durationMs || Infinity, playheadMs + 1000 / (settings.fps || 30)))}>
+            <Icon name="next" />
+          </button>
+        </div>
+        <span className="tc muted">
+          {playing && rate !== 1 ? <b className="rate">{rate}×</b> : null}
+          {formatTimecode(durationMs)}
+        </span>
       </div>
     </section>
   )

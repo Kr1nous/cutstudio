@@ -1,9 +1,9 @@
-# 剪辑台 (videocut) 1.2.0
+# 剪辑台 (videocut) 1.3.0
 
 macOS 桌面剪辑软件（Tauri 2）。面向已经录制好的影片：人在界面里剪，AI 通过 **终端 CLI** 或 **MCP** 接管同一套工具。字幕走独立字幕轨。界面靠近 iMovie / After Effects 的简洁面板，而不是 Premiere 面板墙。
 
 仓库：https://github.com/Kr1nous/videocut  
-安装包：见 [Releases](https://github.com/Kr1nous/videocut/releases) 里的 [`CutStudio_1.2.0_aarch64.dmg`](https://github.com/Kr1nous/videocut/releases/download/v1.2.0/CutStudio_1.2.0_aarch64.dmg)（Apple Silicon）。安装后应用名叫「剪辑台」。
+安装包：见 [Releases](https://github.com/Kr1nous/videocut/releases) 里的 [`CutStudio_1.3.0_aarch64.dmg`](https://github.com/Kr1nous/videocut/releases/download/v1.3.0/CutStudio_1.3.0_aarch64.dmg)（Apple Silicon）。安装后应用名叫「剪辑台」。
 
 ## 运行
 
@@ -27,28 +27,36 @@ npm run build
 
 ## 界面
 
-- **最上方**：效果分类选项卡（剪辑 / 转场 / 文字 / 音频 / 画面 / 滤镜 / 蒙版 / 导出）+ 导入 / 导出 / 终端 / MCP
-- **左**：项目媒体库（卡片按真实比例显示；卡片上可删除，右键也可删）
-- **中**：预览
-- **右**：审查（只显示 AI / MCP / CLI 的改动）
-- **预览下**：检查器（音量、速度、滤镜、透明/缩放关键帧、冻结、倒放、蒙版、旋转、删除片段）
-- **底部时间线**：
-  - 视频轨 + 其下方的图层轨（滤镜/变速/转场写在效果条上；叠加图层、B-roll、纯色层、调整层也在这一层）
-  - 较窄的音频轨、字幕轨
-  - 可拖轨道高度；播完自动回到开头等待再播
-
-没有顶部 AI 对话框。AI 只走终端或 MCP。
+- **顶栏**：项目名（▾ 新建 / 打开 / 最近 / 关闭）、搜索命令 `⌘K`、撤销 / 重做、导入、导出、终端、设置。约 90 个剪辑工具都在 `⌘K` 命令面板里，按名字搜。
+- **左**：素材库（双击加到主线，音频双击设为背景音乐；右键可叠加 B-roll、生成代理、重新分析、删除）
+- **中**：预览（逐帧、播放、当前 / 总时长）
+- **右**：两个标签
+  - **检查器**：随选中对象变化。片段（基础 / 出点转场 / 画面 / 蒙版 / 声音 / 时间）、文字层、字幕（文本、起止微调、字幕样式）、什么都没选时是整片（画幅、字幕样式预设、音乐闪避、响度、章节列表）
+  - **审查**：一键质检（点问题跳到对应位置）、AI 改动记录、撤销历史（点一行直接回到那一步）、AI 自动存的版本
+- **时间线**：主线 / 图层 / 音频 / 字幕四条轨；可缩放、吸附、拖动、修剪，标尺显示章节和入出点
+- **底部终端**：一键启动 claude / codex / grok / gemini
 
 ## 人怎么剪
 
-1. 新建或打开 `.cutproj` 项目，导入成片（会分析静音和镜头）。
-2. 双击素材上故事线。顶部选项卡点工具直接执行。
-3. 选中片段后可用检查器，或点片段上的 × / 右键删除。
-4. 空格播放，`S` 分割，焦点不在终端时 Delete / Backspace 删除，`⌘Z` 撤销。
+1. 新建或打开项目，导入素材（后台自动转写、分析静音和镜头）。
+2. 双击素材加到主线；在底部终端点 `claude` 等按钮让 AI 粗剪，或用 `⌘K` 搜命令自己剪。
+3. 在时间线上微调：拖动片段排序（主线自动吸紧）、拖边缘修剪、双击字幕改文字、右键看更多操作。
+4. 右侧「审查」里质检，`⌘E` 导出（可只导出入点到出点，字幕可烧录 / 另存 SRT）。
+
+| 快捷键 | 作用 |
+|---|---|
+| `空格` / `J` `K` `L` | 播放暂停 / 倒退 · 停 · 播放（再按 L 加速） |
+| `←` `→`（加 `⇧` 为 1 秒） | 逐帧移动 |
+| `⌘B` 或 `S` | 在播放头分割 |
+| `I` / `O` / `⌥X` | 设入点 / 出点 / 清除 |
+| `⌘=` `⌘−` `⇧Z` / 触控板捏合 | 时间线放大 / 缩小 / 适配 |
+| `N` | 吸附开关（拖动时按住 `⌘` 临时关闭） |
+| `⌘K` / `⌘E` | 命令面板 / 导出 |
+| `⌫` | 删除选中的片段、字幕或素材 |
 
 ## AI 怎么接入
 
-推荐做法：在工具栏「终端」里直接运行 `claude` / `codex` / `grok` / `gemini`，然后用一句话说要剪成什么样（例如「剪成 60 秒竖屏短视频，去口头禅，加大字幕和背景音乐」）。
+推荐做法：在底部终端点 `claude` / `codex` / `grok` / `gemini` 按钮（或直接输入命令），然后用一句话说要剪成什么样（例如「剪成 60 秒竖屏短视频，去口头禅，加大字幕和背景音乐」）。
 
 - 打开工程时，剪辑台会在工程目录写好 `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` 和 Claude Code 技能，agent 启动就能读到完整的剪辑流程和规则，不需要手动粘贴提示词。
 - 内置终端里 `claude` / `grok` 在其他目录启动时，也会通过 `--append-system-prompt` / `--rules` 自动带上剪辑说明。
@@ -56,8 +64,8 @@ npm run build
 
 | 入口 | 用法 |
 |---|---|
-| 终端 | 工具栏「终端」，运行 agent，或 `cutstudio help` |
-| MCP | `http://127.0.0.1:4877/mcp`，配置在「MCP」按钮里；`initialize` 返回剪辑说明，`prompts/get` 取配方 |
+| 终端 | 底部终端，点按钮启动 agent，或 `cutstudio help` |
+| MCP | `http://127.0.0.1:4877/mcp`，配置在「设置」里；`initialize` 返回剪辑说明，`prompts/get` 取配方 |
 
 ```bash
 cutstudio prompt [talking_head|shorts|vlog|interview|product]   # 剪辑说明 / 配方
@@ -70,7 +78,7 @@ cutstudio review-timeline                                         # 交付前质
 
 语音转写用本地 whisper.cpp（`brew install whisper-cpp`，模型放在 `~/Library/Application Support/剪辑台/whisper/`）。云端转写默认关闭，可在设置里打开。
 
-## 工具（人点选项卡 = AI 调同名函数）
+## 工具（人用 ⌘K 命令面板 = AI 调同名函数）
 
 - 看素材：`get_project` `get_index` `get_transcript` `get_frame` `contact_sheet` `review_timeline` `render_preview`
 - 按文稿剪：`detect_retakes` `cut_sentences` `remove_filler` `tighten_pauses` `remove_silence` `correct_transcript` `set_vocabulary` `reanalyze_asset`
@@ -108,16 +116,20 @@ src/main/render/      合成图、ffmpeg 导出、单帧采样
 src/cli/              cutstudio 命令行
 src/renderer/         界面
   lib/cut.ts          前端 API（Tauri + sidecar）
-  components/ToolTabs.tsx   顶栏效果分类
-  components/Library.tsx    媒体库
-  components/Timeline.tsx   视频+效果合成轨
-  components/Inspector.tsx  检查器
-  components/ReviewPanel.tsx 仅 AI 改动
+  lib/commands.ts     ⌘K 命令列表（工具 → 中文名、需要的选择）
+  components/TopBar.tsx         顶栏
+  components/CommandPalette.tsx 命令面板
+  components/Library.tsx        素材库
+  components/SidePanel.tsx      右侧：检查器 | 审查
+  components/inspector/         片段 / 字幕 / 整片检查器、字幕样式
+  components/timeline/          时间线（缩放、吸附、拖动、右键菜单）
+  components/ExportDialog.tsx   导出对话框（进度、区间、字幕方式）
+src/shared/tlsnap.ts  时间线吸附、刻度、拖动排序（纯函数）
 ```
 
 剪辑逻辑在 Node sidecar（`http://127.0.0.1:4878`），窗口是 Tauri。MCP 仍是 `http://127.0.0.1:4877/mcp`。
 
-新增工具：`actions.ts` 的 `ACTION_TOOLS` + `runAction` → 自动进 MCP → `src/cli/cutstudio.mjs` 加子命令 → 需要人点的放进 `ToolTabs.tsx`。
+新增工具：`actions.ts` 的 `ACTION_TOOLS` + `runAction` → 自动进 MCP → `src/cli/cutstudio.mjs` 加子命令 → 需要人点的放进 `src/renderer/src/lib/commands.ts`（常调的参数再做进检查器）。
 
 ## 工程文件夹
 

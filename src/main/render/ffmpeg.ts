@@ -1,11 +1,18 @@
 import { spawn } from 'node:child_process'
 
-export function runFfmpeg(cmd: string, args: string[]): Promise<{ code: number; stderr: string; stdout: Buffer }> {
+export function runFfmpeg(
+  cmd: string,
+  args: string[],
+  opts: { onStdout?: (text: string) => void; signal?: AbortSignal } = {}
+): Promise<{ code: number; stderr: string; stdout: Buffer }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], signal: opts.signal })
     const stdout: Buffer[] = []
     let stderr = ''
-    child.stdout.on('data', (d: Buffer) => stdout.push(d))
+    child.stdout.on('data', (d: Buffer) => {
+      stdout.push(d)
+      opts.onStdout?.(d.toString())
+    })
     child.stderr.on('data', (d) => {
       stderr += d.toString()
     })

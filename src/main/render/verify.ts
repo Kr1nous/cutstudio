@@ -38,6 +38,7 @@ import { evenHalf, exportExt, normalizePreset, renderTimeline, videoEncodeArgs, 
 import { renderFrame } from './frame'
 import { brollTests } from './verify-broll'
 import { toolsTests } from './verify-tools'
+import { uiTests } from './verify-ui'
 
 function clip(partial: Partial<TimelineClip> & Pick<TimelineClip, 'id' | 'assetId'>): TimelineClip {
   return {
@@ -1801,6 +1802,7 @@ async function main(): Promise<void> {
   await analysisFfmpegTests()
   await brollTests(await findFfmpeg())
   await toolsTests(await findFfmpeg())
+  await uiTests(await findFfmpeg())
   console.log('compose verify ok (phase 1–9)')
 }
 

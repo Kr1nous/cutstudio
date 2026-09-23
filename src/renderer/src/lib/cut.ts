@@ -2,9 +2,9 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { desktopDir, documentDir, downloadDir, videoDir } from '@tauri-apps/api/path'
 import { ask, message, open, save } from '@tauri-apps/plugin-dialog'
-import type { AppSettings, TimelineOp } from '@shared/types'
+import type { AppSettings, ExportOptions, ExportProgress, RecentProject, TimelineOp } from '@shared/types'
 
-const API = 'http://127.0.0.1:4878'
+const API: string = import.meta.env.VITE_CUT_API || 'http://127.0.0.1:4878'
 
 type Unsub = () => void
 
@@ -58,6 +58,7 @@ const stateListeners = new Set<(state: unknown) => void>()
 const termDataListeners = new Set<(data: string) => void>()
 const termExitListeners = new Set<(code: number) => void>()
 const menuListeners = new Set<(action: string) => void>()
+const exportListeners = new Set<(p: ExportProgress) => void>()
 
 function connectEvents(): Unsub {
   const es = new EventSource(`${API}/events`)
@@ -72,6 +73,10 @@ function connectEvents(): Unsub {
   es.addEventListener('terminal-exit', (e) => {
     const data = JSON.parse((e as MessageEvent).data) as number
     for (const cb of termExitListeners) cb(data)
+  })
+  es.addEventListener('export-progress', (e) => {
+    const data = JSON.parse((e as MessageEvent).data) as ExportProgress
+    for (const cb of exportListeners) cb(data)
   })
   es.onerror = () => {
     /* browser reconnects */
@@ -121,6 +126,10 @@ export const cutApi = {
     if (!picked) return null
     return api('POST', '/project/open', { path: picked })
   },
+  openProjectPath: (path: string) => api('POST', '/project/open', { path }),
+  closeProject: () => api('POST', '/project/close'),
+  recentProjects: () => api<(RecentProject & { exists: boolean })[]>('GET', '/projects/recent'),
+  forgetRecent: (path: string) => api('POST', '/projects/forget', { path }),
   renameProject: (name: string) => api('POST', '/project/rename', { name }),
   importMedia: async () => {
     const picked = await open({
@@ -139,20 +148,33 @@ export const cutApi = {
   updateAssetMeta: (assetId: string, meta: object) => api('POST', '/media/updateMeta', { assetId, meta }),
   probeAsset: (assetId: string) => api('POST', '/media/probe', { assetId }),
   saveThumb: (assetId: string, dataUrl: string) => api('POST', '/media/thumb', { assetId, dataUrl }),
-  exportTimeline: async (preset?: string) => {
-    const r = await api<{ path: string }>('POST', '/media/export', { preset })
-    return r.path
+  exportTimeline: (opts: ExportOptions = {}) => api<{ path: string; warnings: string[] }>('POST', '/media/export', opts),
+  cancelExport: () => api('POST', '/media/export/cancel'),
+  onExportProgress: (cb: (p: ExportProgress) => void) => {
+    exportListeners.add(cb)
+    return () => {
+      exportListeners.delete(cb)
+    }
+  },
+  pickExportPath: async (defaultName: string) => {
+    const dir = await defaultSaveDir()
+    const picked = await save({
+      title: '导出到',
+      defaultPath: dir ? `${dir}/${defaultName}` : defaultName,
+      filters: [{ name: '影片', extensions: ['mp4', 'mov'] }]
+    })
+    return picked || null
   },
   runAction: (name: string, args: Record<string, unknown> = {}) => api('POST', '/action/run', { name, args }),
   applyOps: (ops: TimelineOp[], summary?: string) => api('POST', '/timeline/ops', { ops, summary }),
-  undo: () => api('POST', '/timeline/undo'),
-  redo: () => api('POST', '/timeline/redo'),
+  undo: (steps = 1) => api('POST', '/timeline/undo', { steps }),
+  redo: (steps = 1) => api('POST', '/timeline/redo', { steps }),
   restore: (id: string) => api('POST', '/timeline/restore', { id }),
   runAi: (prompt: string, frames: { mime: string; data: string }[] = []) => api('POST', '/ai/run', { prompt, frames }),
   updateSettings: (patch: Partial<AppSettings>) => api('POST', '/settings/update', { patch }),
   mcpStatus: () => api('GET', '/mcp/status'),
   showInFolder: async (path: string) => {
-    await invoke('show_in_folder', { path })
+    if (isTauri()) await invoke('show_in_folder', { path })
   },
   getPathForFile: (file: File) => {
     const withPath = file as File & { path?: string }
@@ -202,6 +224,8 @@ export const cutApi = {
   },
   terminalStart: (cols: number, rows: number) => api('POST', '/terminal/start', { cols, rows }),
   terminalRestart: (cols: number, rows: number) => api('POST', '/terminal/restart', { cols, rows }),
+  terminalStatus: () =>
+    api<{ running: boolean; foreground: string | null; busy: boolean; agents: Record<string, boolean> }>('GET', '/terminal/status'),
   terminalWrite: (data: string) => {
     void api('POST', '/terminal/write', { data })
   },

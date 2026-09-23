@@ -28,10 +28,19 @@ import {
 const UNDO_LIMIT = 80
 
 /** transcript 只在会改转写的操作（pushUndo(label, { transcript: true })）里保存，避免撤销剪辑时连带回退后台的转写重新对齐。 */
-type UndoEntry = { timeline: Timeline; transcript?: Project['transcript']; label?: string }
+type UndoEntry = {
+  timeline: Timeline
+  transcript?: Project['transcript']
+  subtitleStyle: Project['subtitleStyle']
+  markers: Project['markers']
+  label?: string
+}
+
+const RECENT_LIMIT = 12
 
 export type EditorState = ReturnType<ProjectStore['getState']>
 type StateListener = (state: EditorState) => void
+type EventListener = (name: string, data: unknown) => void
 
 export class ProjectStore {
   project: Project | null = null
@@ -41,11 +50,30 @@ export class ProjectStore {
   private undo: UndoEntry[] = []
   private redo: UndoEntry[] = []
   private listeners = new Set<StateListener>()
+  private eventListeners = new Set<EventListener>()
 
   onChange(fn: StateListener): () => void {
     this.listeners.add(fn)
     return () => {
       this.listeners.delete(fn)
+    }
+  }
+
+  /** 状态之外的事件（导出进度等），经 SSE 推给界面。 */
+  onEvent(fn: EventListener): () => void {
+    this.eventListeners.add(fn)
+    return () => {
+      this.eventListeners.delete(fn)
+    }
+  }
+
+  emitEvent(name: string, data: unknown): void {
+    for (const fn of this.eventListeners) {
+      try {
+        fn(name, data)
+      } catch (err) {
+        console.error(err)
+      }
     }
   }
 
@@ -66,6 +94,7 @@ export class ProjectStore {
       projectPath: this.projectPath,
       canUndo: this.undo.length > 0,
       canRedo: this.redo.length > 0,
+      history: this.history(),
       settings: this.publicSettings()
     }
   }
@@ -159,7 +188,7 @@ export class ProjectStore {
     this.projectPath = folder
     this.undo = []
     this.redo = []
-    this.settings.lastProjectPath = folder
+    this.rememberProject(folder, name)
     await this.saveSettings()
     await this.save()
     this.writeAgentDocs()
@@ -172,7 +201,7 @@ export class ProjectStore {
     this.projectPath = folder
     this.undo = []
     this.redo = []
-    this.settings.lastProjectPath = folder
+    this.rememberProject(folder, this.project.name)
     await this.saveSettings()
     this.writeAgentDocs()
     this.broadcast()
@@ -181,6 +210,32 @@ export class ProjectStore {
       this,
       this.project.assets.filter((a) => a.kind === 'video' || a.kind === 'audio').map((a) => a.id)
     )
+  }
+
+  /** 记进最近项目（去重，最多 RECENT_LIMIT 个），同时作为下次启动要打开的工程。 */
+  rememberProject(folder: string, name: string): void {
+    this.settings.lastProjectPath = folder
+    const rest = (this.settings.recentProjects ?? []).filter((r) => r.path !== folder)
+    this.settings.recentProjects = [{ path: folder, name, openedAt: nowIso() }, ...rest].slice(0, RECENT_LIMIT)
+  }
+
+  async forgetRecent(folder: string): Promise<void> {
+    this.settings.recentProjects = (this.settings.recentProjects ?? []).filter((r) => r.path !== folder)
+    if (this.settings.lastProjectPath === folder) this.settings.lastProjectPath = undefined
+    await this.saveSettings()
+    this.broadcast()
+  }
+
+  /** 关闭当前工程，回到欢迎页。 */
+  async closeProject(): Promise<void> {
+    if (this.project) await this.save()
+    this.project = null
+    this.projectPath = null
+    this.undo = []
+    this.redo = []
+    this.settings.lastProjectPath = undefined
+    await this.saveSettings()
+    this.broadcast()
   }
 
   /** 工程目录里写给终端 AI agent 的说明文件（CLAUDE.md / AGENTS.md / GEMINI.md / skill）。失败不影响工程。 */
@@ -213,13 +268,21 @@ export class ProjectStore {
   /** 撤销点：时间线深拷贝；转写按引用保存（转写只会整体替换，不会原地改）。 */
   private entry(label?: string, withTranscript = false): UndoEntry {
     const p = this.requireProject()
-    return { timeline: structuredClone(p.timeline), ...(withTranscript ? { transcript: p.transcript } : {}), label }
+    return {
+      timeline: structuredClone(p.timeline),
+      ...(withTranscript ? { transcript: p.transcript } : {}),
+      subtitleStyle: structuredClone(p.subtitleStyle),
+      markers: structuredClone(p.markers ?? []),
+      label
+    }
   }
 
   private restore(e: UndoEntry): void {
     const p = this.requireProject()
     p.timeline = e.timeline
     if (e.transcript) p.transcript = e.transcript
+    p.subtitleStyle = e.subtitleStyle
+    p.markers = e.markers
   }
 
   /** 把 fn 里多次改动合并成一次撤销、一条审查记录、至多一个版本快照。 */
@@ -252,23 +315,43 @@ export class ProjectStore {
 
   /** 撤销上一步，返回被撤销那一步的说明（没有可撤销的返回 null）。 */
   async undoLast(): Promise<{ label: string } | null> {
-    if (!this.project || this.undo.length === 0) return null
-    const e = this.undo.pop()!
-    this.redo.push(this.entry(e.label, Boolean(e.transcript)))
-    this.restore(e)
-    await this.save()
-    this.broadcast()
-    return { label: e.label ?? '上一步改动' }
+    const labels = await this.undoSteps(1)
+    return labels.length ? { label: labels[0]! } : null
   }
 
   async redoLast(): Promise<{ label: string } | null> {
-    if (!this.project || this.redo.length === 0) return null
-    const e = this.redo.pop()!
-    this.undo.push(this.entry(e.label, Boolean(e.transcript)))
-    this.restore(e)
+    const labels = await this.redoSteps(1)
+    return labels.length ? { label: labels[0]! } : null
+  }
+
+  /** 连续撤销 n 步（历史列表一次跳到某一步），只保存、广播一次。返回撤掉的各步说明。 */
+  async undoSteps(n: number): Promise<string[]> {
+    return this.step(this.undo, this.redo, n)
+  }
+
+  async redoSteps(n: number): Promise<string[]> {
+    return this.step(this.redo, this.undo, n)
+  }
+
+  private async step(from: UndoEntry[], to: UndoEntry[], n: number): Promise<string[]> {
+    if (!this.project) return []
+    const labels: string[] = []
+    for (let i = 0; i < Math.max(1, Math.floor(n)) && from.length; i++) {
+      const e = from.pop()!
+      to.push(this.entry(e.label, Boolean(e.transcript)))
+      this.restore(e)
+      labels.push(e.label ?? '上一步改动')
+    }
+    if (!labels.length) return labels
     await this.save()
     this.broadcast()
-    return { label: e.label ?? '上一步改动' }
+    return labels
+  }
+
+  /** 撤销 / 重做栈的说明，最近的在前。 */
+  history(): { undo: string[]; redo: string[] } {
+    const label = (e: UndoEntry) => e.label ?? '上一步改动'
+    return { undo: this.undo.map(label).reverse(), redo: this.redo.map(label).reverse() }
   }
 
   /** 下一次 undo 会撤掉什么。 */
@@ -628,6 +711,8 @@ function applyOp(project: Project, op: TimelineOp, clipSource: TimelineClip['sou
       for (const clip of tl.storyline) {
         if (!op.clipIds.includes(clip.id)) next.push(clip)
       }
+      // packStoryline 按 startMs 排序，先写成新顺序，打包后再算真实位置
+      next.forEach((clip, i) => (clip.startMs = i))
       tl.storyline = next
       break
     }

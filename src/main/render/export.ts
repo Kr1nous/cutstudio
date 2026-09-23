@@ -4,7 +4,9 @@ import { even } from '../../shared/compose'
 import { VOICE_FILTERS } from '../../shared/voice'
 import { id, nowIso } from '../../shared/ids'
 import {
+  type ExportOptions,
   type ExportPreset,
+  type ExportProgress,
   type MediaAsset,
   type Project,
   type RenderJob,
@@ -53,8 +55,23 @@ export async function collectStreams(
   return map
 }
 
-/** renderTimeline 的覆盖项：render_preview 用低清尺寸和快速编码。 */
-export type RenderOverrides = { size?: { width: number; height: number }; encode?: string[] }
+/** renderTimeline 的覆盖项：render_preview 用低清尺寸和快速编码；导出对话框用区间、字幕方式、进度和取消。 */
+export type RenderOverrides = {
+  size?: { width: number; height: number }
+  encode?: string[]
+  rangeMs?: { startMs: number; endMs: number }
+  subtitles?: 'burn' | 'srt' | 'none'
+  onProgress?: (ratio: number) => void
+  signal?: AbortSignal
+}
+
+/** 解析 ffmpeg -progress 输出，返回已编码到的毫秒（结束时返回 Infinity）；这一段没有进度信息返回 null。 */
+export function parseProgress(chunk: string): number | null {
+  if (/^progress=end\s*$/m.test(chunk)) return Infinity
+  let ms: number | null = null
+  for (const m of chunk.matchAll(/^out_time_(?:us|ms)=(\d+)\s*$/gm)) ms = Number(m[1]) / 1000
+  return ms
+}
 
 /** 工程里有片段开了人声增强时，查一下本机 ffmpeg 有哪些相关滤镜（没有的跳过）。 */
 async function voiceFilterSet(ffmpeg: string, project: Project): Promise<Set<string> | undefined> {
@@ -80,11 +97,26 @@ export async function renderTimeline(project: Project, outPath: string, preset =
   const exportDir = join(outPath, '..')
   await mkdir(exportDir, { recursive: true })
   lastRenderWarnings = []
+  const range = overrides.rangeMs && overrides.rangeMs.endMs > overrides.rangeMs.startMs ? overrides.rangeMs : null
+  const subMode = overrides.subtitles ?? 'burn'
   const subs = project.timeline.subtitles
   const canBurn = await ffmpegHasFilter(ffmpeg, 'ass')
-  const assPath = canBurn ? await writeAss(project, exportDir, width, height) : null
+  const assPath = canBurn && subMode === 'burn' ? await writeAss(project, exportDir, width, height) : null
   let softSrt: string | null = null
-  if (subs.length && !canBurn) {
+  if (subMode === 'srt' && subs.length) {
+    const srtPath = outPath.replace(/\.[^.]+$/, '') + '.srt'
+    const shift = range?.startMs ?? 0
+    const cues = subs
+      .filter((c) => !range || (c.endMs > range.startMs && c.startMs < range.endMs))
+      .map((c) => ({
+        text: c.text,
+        startMs: Math.max(0, c.startMs - shift),
+        endMs: Math.min(range ? range.endMs - shift : Infinity, c.endMs - shift)
+      }))
+    await writeFile(srtPath, srtText(cues), 'utf8')
+    lastRenderWarnings.push(`字幕另存为 ${srtPath}`)
+  }
+  if (subMode === 'burn' && subs.length && !canBurn) {
     // 本机 ffmpeg 没有 libass：字幕改为软字幕轨 + 同名 .srt，而不是整个导出失败。
     softSrt = outPath.replace(/\.[^.]+$/, '') + '.srt'
     await writeFile(softSrt, srtText(subs), 'utf8')
@@ -118,18 +150,44 @@ export async function renderTimeline(project: Project, outPath: string, preset =
   args.push(...(overrides.encode ?? videoEncodeArgs(preset)))
   if (graph.audioMap) args.push('-c:a', 'aac', '-b:a', '192k')
   if (softSrt) args.push('-c:s', 'mov_text')
-  args.push('-t', (graph.durationMs / 1000).toFixed(3), outPath)
+  // 区间在输出端裁（滤镜图之后），字幕 / 转场的时间仍按整条时间线算
+  const startMs = range ? Math.max(0, range.startMs) : 0
+  const endMs = range ? Math.min(graph.durationMs, range.endMs) : graph.durationMs
+  if (endMs <= startMs) throw new Error('导出区间是空的')
+  if (startMs > 0) args.push('-ss', (startMs / 1000).toFixed(3))
+  args.push('-t', ((endMs - startMs) / 1000).toFixed(3))
+  if (overrides.onProgress) args.push('-progress', 'pipe:1', '-nostats')
+  args.push(outPath)
 
-  let result = await runFfmpeg(ffmpeg, args)
+  const total = endMs - startMs
+  const run = (a: string[]) =>
+    runFfmpeg(ffmpeg, a, {
+      signal: overrides.signal,
+      onStdout: overrides.onProgress
+        ? (text) => {
+            const ms = parseProgress(text)
+            if (ms == null) return
+            // 输出端 -ss 时 out_time 从 0 开始；个别版本从区间起点算，统一折算
+            const done = ms === Infinity ? total : ms > total + 500 ? ms - startMs : ms
+            overrides.onProgress!(Math.max(0, Math.min(1, done / total)))
+          }
+        : undefined
+    }).catch((e: unknown) => {
+      if (overrides.signal?.aborted) throw new Error('已取消导出')
+      throw e
+    })
+  let result = await run(args)
+  if (overrides.signal?.aborted) throw new Error('已取消导出')
   if (result.code !== 0 && (preset === 'alpha' || size.alpha)) {
     const fallback = args
       .map((a) => (a === 'prores_ks' ? 'qtrle' : a === 'yuva444p10le' ? 'argb' : a))
       .filter((a) => a !== '-profile:v' && a !== '4444')
-    result = await runFfmpeg(ffmpeg, fallback)
+    result = await run(fallback)
   } else if (result.code !== 0 && preset === 'prores') {
     const fallback = args.map((a) => (a === 'prores_ks' ? 'prores' : a)).filter((a) => a !== '-profile:v' && a !== '3')
-    result = await runFfmpeg(ffmpeg, fallback)
+    result = await run(fallback)
   }
+  if (overrides.signal?.aborted) throw new Error('已取消导出')
   if (result.code !== 0) throw new Error(result.stderr.slice(-1200) || '导出失败')
 }
 
@@ -147,22 +205,61 @@ export function srtText(subs: { startMs: number; endMs: number; text: string }[]
   return subs.map((c, i) => `${i + 1}\n${fmt(c.startMs)} --> ${fmt(c.endMs)}\n${c.text}\n`).join('\n')
 }
 
-export async function exportTimeline(preset = '1080p', fileHint?: string): Promise<string> {
+let currentExport: AbortController | null = null
+
+/** 取消正在进行的导出；没有导出时返回 false。 */
+export function cancelExport(): boolean {
+  if (!currentExport) return false
+  currentExport.abort()
+  return true
+}
+
+/** 导出成片。进度经 export-progress 事件推给界面（CLI / MCP / 渲染队列发起的导出也一样）。 */
+export async function exportTimeline(preset = '1080p', fileHint?: string, opts: ExportOptions = {}): Promise<string> {
   const project = store.requireProject()
   if (!store.projectPath) throw new Error('项目路径丢失')
-  const kind = normalizePreset(preset)
+  if (currentExport) throw new Error('已有导出在进行，等它完成或先取消')
+  const kind = normalizePreset(opts.preset ?? preset)
   const ext = exportExt(kind)
-  const out = join(store.projectPath, 'export', `${fileHint || Date.now()}.${ext}`)
-  await renderTimeline(project, out, kind)
+  const out = opts.outPath
+    ? opts.outPath.replace(/\.(mp4|mov|m4v)$/i, '') + '.' + ext
+    : join(store.projectPath, 'export', `${fileHint || Date.now()}.${ext}`)
+  const ctrl = new AbortController()
+  currentExport = ctrl
+  const jobId = id('exp')
+  let last = 0
+  const report = (p: Omit<ExportProgress, 'id' | 'preset'>) => store.emitEvent('export-progress', { id: jobId, preset: kind, ...p })
+  report({ status: 'running', ratio: 0 })
+  try {
+    await renderTimeline(project, out, kind, {
+      rangeMs: opts.rangeMs,
+      subtitles: opts.subtitles,
+      signal: ctrl.signal,
+      onProgress: (ratio) => {
+        const now = Date.now()
+        if (now - last < 200 && ratio < 1) return
+        last = now
+        report({ status: 'running', ratio })
+      }
+    })
+  } catch (e) {
+    const cancelled = ctrl.signal.aborted
+    report({ status: cancelled ? 'cancelled' : 'error', ratio: 0, error: cancelled ? '已取消导出' : e instanceof Error ? e.message : String(e) })
+    throw cancelled ? new Error('已取消导出') : e
+  } finally {
+    currentExport = null
+  }
+  const seconds = Math.round(((opts.rangeMs ? opts.rangeMs.endMs - opts.rangeMs.startMs : timelineDurationMs(project.timeline))) / 1000)
   store.log({
     tool: 'export',
-    summary: `导出 ${Math.round(timelineDurationMs(project.timeline) / 1000)} 秒成片（${kind}）`,
+    summary: `导出 ${seconds} 秒${opts.rangeMs ? '片段' : '成片'}（${kind}）`,
     risk: 'low',
     source: 'human',
     reversible: false
   })
   await store.save()
   store.broadcast()
+  report({ status: 'done', ratio: 1, path: out, warnings: [...lastRenderWarnings] })
   return out
 }
 

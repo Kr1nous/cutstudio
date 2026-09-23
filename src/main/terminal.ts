@@ -10,7 +10,11 @@ interface Session {
   write: (data: string) => void
   resize: (cols: number, rows: number) => void
   kill: () => void
+  /** 前台进程名（node-pty 提供；script 兜底时拿不到）。 */
+  foreground?: () => string
 }
+
+export const AGENTS = ['claude', 'codex', 'grok', 'gemini'] as const
 
 export type TerminalSink = { send: (channel: string, payload: unknown) => void }
 
@@ -107,7 +111,8 @@ async function spawnPty(cols: number, rows: number, cwd: string): Promise<Sessio
     return {
       write: (data) => p.write(data),
       resize: (c, r) => p.resize(c, r),
-      kill: () => p.kill()
+      kill: () => p.kill(),
+      foreground: () => p.process
     }
   } catch (err) {
     console.warn('node-pty 不可用，改用 script', err)
@@ -167,6 +172,34 @@ export async function restartTerminal(cols: number, rows: number): Promise<{ ok:
   const cwd = store.projectPath || homedir()
   session = await spawnPty(Math.max(40, cols || 80), Math.max(10, rows || 24), cwd)
   return { ok: true, cwd }
+}
+
+function onPath(name: string, env: NodeJS.ProcessEnv): boolean {
+  const home = homedir()
+  const dirs = [
+    ...(env.PATH ?? '').split(':'),
+    join(home, '.local/bin'),
+    join(home, '.claude/local'),
+    join(home, '.npm-global/bin'),
+    join(home, '.bun/bin'),
+    join(home, '.volta/bin')
+  ]
+  return dirs.some((d) => d && existsSync(join(d, name)))
+}
+
+let agentCache: { at: number; installed: Record<string, boolean> } | null = null
+
+/** 终端状态：是否在跑、前台进程（shell 以外说明 agent 等程序正在运行）、各 agent 是否装了。 */
+export function terminalStatus(): { running: boolean; foreground: string | null; busy: boolean; agents: Record<string, boolean> } {
+  if (!agentCache || Date.now() - agentCache.at > 30_000) {
+    const env = shellEnv()
+    agentCache = { at: Date.now(), installed: Object.fromEntries(AGENTS.map((a) => [a, onPath(a, env)])) }
+  }
+  const raw = session?.foreground?.() ?? null
+  const fg = raw ? raw.split('/').pop()! : null
+  const shell = (process.env.SHELL || '/bin/zsh').split('/').pop() ?? 'zsh'
+  const busy = fg != null && !['zsh', 'bash', 'sh', 'fish', shell, 'login'].includes(fg.replace(/^-/, ''))
+  return { running: session != null, foreground: fg, busy, agents: agentCache.installed }
 }
 
 export function stopTerminal(): void {

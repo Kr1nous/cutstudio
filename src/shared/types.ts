@@ -408,7 +408,46 @@ export interface AppSettings {
   mcpPort: number
   firstRunComplete: boolean
   lastProjectPath?: string
+  /** 最近打开的工程，新的在前。 */
+  recentProjects?: RecentProject[]
   providers: AiProvider[]
+}
+
+export interface RecentProject {
+  path: string
+  name: string
+  openedAt: string
+}
+
+/** 质检（review_timeline）发现的问题。 */
+export interface ReviewIssue {
+  severity: 'error' | 'warn' | 'info'
+  code: string
+  atMs?: number
+  clipId?: string
+  message: string
+}
+
+/** 界面导出对话框的选项。 */
+export interface ExportOptions {
+  preset?: string
+  /** 只导出时间线上的这一段。 */
+  rangeMs?: { startMs: number; endMs: number }
+  /** burn = 烧进画面（默认）；srt = 另存同名 .srt；none = 不要字幕。 */
+  subtitles?: 'burn' | 'srt' | 'none'
+  /** 指定输出文件（绝对路径）；不填写到工程 export 目录。 */
+  outPath?: string
+}
+
+/** 导出进度事件（SSE export-progress）。 */
+export interface ExportProgress {
+  id: string
+  preset: string
+  status: 'running' | 'done' | 'error' | 'cancelled'
+  ratio: number
+  path?: string
+  error?: string
+  warnings?: string[]
 }
 
 export type TimelineOp =

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
@@ -19,8 +19,19 @@ function xtermTheme(dark: boolean) {
       }
 }
 
-export function TerminalPanel({ dark, onClose }: { dark: boolean; onClose: () => void }) {
+const AGENTS = ['claude', 'codex', 'grok', 'gemini'] as const
+
+type Status = { running: boolean; foreground: string | null; busy: boolean; agents: Record<string, boolean> }
+
+/** 往终端里输入一条命令：先清掉当前行，cd 回工程目录再启动。 */
+export function launchAgent(agent: string, projectPath: string | null): void {
+  const cd = projectPath ? `cd '${projectPath.replace(/'/g, `'\\''`)}' && ` : ''
+  window.cut.terminalWrite(`\x15${cd}${agent}\r`)
+}
+
+export function TerminalPanel({ dark, projectPath, onClose }: { dark: boolean; projectPath: string | null; onClose: () => void }) {
   const hostRef = useRef<HTMLDivElement>(null)
+  const [status, setStatus] = useState<Status | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
 
@@ -77,13 +88,53 @@ export function TerminalPanel({ dark, onClose }: { dark: boolean; onClose: () =>
     if (termRef.current) termRef.current.options.theme = xtermTheme(dark)
   }, [dark])
 
+  // 前台是不是已经在跑 agent / 各 agent 是否安装：决定启动按钮能不能点
+  useEffect(() => {
+    let alive = true
+    const poll = () =>
+      void window.cut
+        .terminalStatus()
+        .then((s) => alive && setStatus(s))
+        .catch(() => undefined)
+    poll()
+    const t = window.setInterval(poll, 2500)
+    return () => {
+      alive = false
+      window.clearInterval(t)
+    }
+  }, [])
+
   return (
     <div className="term-wrap">
       <div className="term-h">
-        <span>终端 · CLI AI 用 cutstudio 接管剪辑</span>
+        <span className="term-title">
+          终端
+          {status?.busy && status.foreground ? <em>· 正在运行 {status.foreground}</em> : <em>· 启动 AI 接管剪辑</em>}
+        </span>
+        <span className="term-agents">
+          {AGENTS.map((a) => {
+            const installed = status ? status.agents[a] !== false : true
+            return (
+              <button
+                key={a}
+                type="button"
+                className="agent-btn"
+                disabled={!installed || Boolean(status?.busy)}
+                title={!installed ? `没找到 ${a} 命令，先安装它` : status?.busy ? '终端里已有程序在运行' : `在工程目录启动 ${a}（自动读到剪辑说明）`}
+                onClick={() => {
+                  launchAgent(a, projectPath)
+                  termRef.current?.focus()
+                  window.setTimeout(() => void window.cut.terminalStatus().then(setStatus).catch(() => undefined), 800)
+                }}
+              >
+                {a}
+              </button>
+            )
+          })}
+        </span>
         <span className="term-actions">
           <button
-            className="btn ghost"
+            className="btn ghost small"
             onClick={() => {
               const term = termRef.current
               const fit = fitRef.current
@@ -94,7 +145,7 @@ export function TerminalPanel({ dark, onClose }: { dark: boolean; onClose: () =>
           >
             重启
           </button>
-          <button className="btn ghost" onClick={onClose}>
+          <button className="btn ghost small" onClick={onClose}>
             收起
           </button>
         </span>

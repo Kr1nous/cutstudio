@@ -1,6 +1,15 @@
-import { useEffect, useState } from 'react'
 import type { MediaAsset } from '@shared/types'
 import { formatTimecode, mediaUrl } from '../lib/format'
+import { useContextMenu, type MenuItem } from './ContextMenu'
+import { Icon } from './Icon'
+
+function analysisNote(a: MediaAsset): string | null {
+  if (a.kind === 'image') return null
+  const t = a.index?.transcription
+  if (t === 'pending') return '转写中'
+  if (t === 'error') return '转写失败'
+  return null
+}
 
 export function Library({
   assets,
@@ -8,138 +17,86 @@ export function Library({
   onSelect,
   onImport,
   onAddToTimeline,
+  onAction,
   onDelete
 }: {
   assets: MediaAsset[]
   selectedId: string | null
-  onSelect: (id: string) => void
+  onSelect: (id: string | null) => void
   onImport: () => void
   onAddToTimeline: (id: string) => void
+  onAction: (name: string, args?: Record<string, unknown>) => void
   onDelete: (id: string) => void
 }) {
-  const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(null)
+  const menu = useContextMenu()
 
-  useEffect(() => {
-    if (!menu) return
-    const close = (e: Event) => {
-      if ((e.target as HTMLElement).closest?.('.ctx-menu')) return
-      setMenu(null)
+  function assetMenu(e: React.MouseEvent, a: MediaAsset) {
+    onSelect(a.id)
+    const items: MenuItem[] = []
+    if (a.kind === 'audio') {
+      items.push({ label: '设为背景音乐', onClick: () => onAction('set_music', { assetId: a.id }) })
+    } else {
+      items.push({ label: '加到主线末尾', hint: '双击', onClick: () => onAddToTimeline(a.id) })
+      items.push({ label: '在播放头叠加 B-roll', onClick: () => onAction('insert_broll', { assetId: a.id }) })
     }
-    const timer = window.setTimeout(() => {
-      window.addEventListener('mousedown', close)
-      window.addEventListener('contextmenu', close)
-    }, 0)
-    return () => {
-      window.clearTimeout(timer)
-      window.removeEventListener('mousedown', close)
-      window.removeEventListener('contextmenu', close)
-    }
-  }, [menu])
+    if (a.kind === 'video') items.push({ label: a.proxyPath ? '重新生成代理' : '生成代理（预览更流畅）', onClick: () => onAction('make_proxy', { assetId: a.id }) })
+    if (a.kind !== 'image') items.push({ label: '重新分析（转写 / 静音 / 镜头）', onClick: () => onAction('reanalyze_asset', { assetId: a.id }) })
+    items.push('sep', { label: '删除素材', danger: true, onClick: () => onDelete(a.id) })
+    menu.open(e, items)
+  }
 
   return (
-    <section className="panel">
+    <section className="panel library">
       <div className="panel-h">
-        <span>项目</span>
-        <span className="row" style={{ gap: 6 }}>
-          <button className="btn ghost" onClick={onImport}>
-            导入
-          </button>
-          <button
-            className="btn ghost"
-            disabled={!selectedId}
-            onClick={() => {
-              if (selectedId) onDelete(selectedId)
-            }}
-          >
-            删除
-          </button>
-        </span>
+        <span>素材 {assets.length ? <em>{assets.length}</em> : null}</span>
+        <button type="button" className="icon-btn" title="导入素材 ⌘I" onClick={onImport}>
+          <Icon name="plus" size={15} />
+        </button>
       </div>
       {assets.length === 0 ? (
-        <div className="drop-hint">把已经录制好的影片拖到这里或点击导入。右键也可删除。</div>
+        <button type="button" className="drop-hint" onClick={onImport}>
+          <b>拖入或点击导入</b>
+          <span>视频、音频、图片都可以</span>
+        </button>
       ) : (
-        <div className="library-grid">
-          {assets.map((a) => (
-            <div
-              key={a.id}
-              className={'asset' + (selectedId === a.id ? ' selected' : '')}
-              onClick={() => onSelect(a.id)}
-              onDoubleClick={() => onAddToTimeline(a.id)}
-              onContextMenu={(e) => {
-                e.preventDefault()
-                e.stopPropagation()
-                onSelect(a.id)
-                setMenu({ x: e.clientX, y: e.clientY, id: a.id })
-              }}
-            >
+        <div
+          className="library-grid"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) onSelect(null)
+          }}
+        >
+          {assets.map((a) => {
+            const note = analysisNote(a)
+            return (
               <div
-                className="thumb"
-                style={{
-                  aspectRatio: a.width > 0 && a.height > 0 ? `${a.width} / ${a.height}` : '16 / 9'
-                }}
+                key={a.id}
+                className={'asset' + (selectedId === a.id ? ' selected' : '')}
+                onClick={() => onSelect(a.id)}
+                onDoubleClick={() => (a.kind === 'audio' ? onAction('set_music', { assetId: a.id }) : onAddToTimeline(a.id))}
+                onContextMenu={(e) => assetMenu(e, a)}
+                title={`${a.name}\n双击${a.kind === 'audio' ? '设为背景音乐' : '加到主线'}，右键更多`}
               >
-                {a.thumbPath ? (
-                  <img src={mediaUrl(a.thumbPath)} alt="" />
-                ) : a.kind === 'image' ? (
-                  <img src={mediaUrl(a.path)} alt="" />
-                ) : a.kind === 'video' ? (
-                  '视频'
-                ) : (
-                  a.kind
-                )}
+                <div className="thumb">
+                  {a.thumbPath ? (
+                    <img src={mediaUrl(a.thumbPath)} alt="" draggable={false} />
+                  ) : a.kind === 'image' ? (
+                    <img src={mediaUrl(a.path)} alt="" draggable={false} />
+                  ) : (
+                    <span className="thumb-kind">{a.kind === 'audio' ? '♪' : '视频'}</span>
+                  )}
+                  {a.durationMs ? <span className="thumb-dur">{formatTimecode(a.durationMs)}</span> : null}
+                  {note ? <span className="thumb-note">{note}</span> : null}
+                </div>
+                <div className="meta">
+                  <b>{a.name}</b>
+                  {!a.durationMs && a.kind !== 'image' ? <small>读取中…</small> : null}
+                </div>
               </div>
-              <div className="meta">
-                <b title={a.name}>{a.name}</b>
-                <small>
-                  {a.durationMs ? formatTimecode(a.durationMs) : '读取中…'}
-                  {a.proxyPath ? ' · 代理' : ''}
-                </small>
-                <button
-                  type="button"
-                  className="asset-del"
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.preventDefault()
-                    e.stopPropagation()
-                    onDelete(a.id)
-                  }}
-                >
-                  删除
-                </button>
-              </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
-      {menu ? (
-        <div
-          className="ctx-menu"
-          style={{ left: menu.x, top: menu.y }}
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          <button
-            type="button"
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={() => {
-              onAddToTimeline(menu.id)
-              setMenu(null)
-            }}
-          >
-            加到故事线
-          </button>
-          <button
-            type="button"
-            className="danger"
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={() => {
-              onDelete(menu.id)
-              setMenu(null)
-            }}
-          >
-            删除素材
-          </button>
-        </div>
-      ) : null}
+      {menu.node}
     </section>
   )
 }
