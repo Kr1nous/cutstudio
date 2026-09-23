@@ -1,9 +1,24 @@
-# 剪辑台 (videocut) 1.3.0
+# CutStudio 剪辑台
 
-macOS 桌面剪辑软件（Tauri 2）。面向已经录制好的影片：人在界面里剪，AI 通过 **终端 CLI** 或 **MCP** 接管同一套工具。字幕走独立字幕轨。界面靠近 iMovie / After Effects 的简洁面板，而不是 Premiere 面板墙。
+**让 AI 帮你剪视频的 macOS 剪辑软件。** 导入录好的素材，在内置终端里点一下 `claude`（或 codex / grok / gemini），说一句「剪成 60 秒竖屏短视频，去掉口误，加大字幕和背景音乐」，AI 就会听懂内容、看画面、按剪辑规则下刀，改动实时出现在时间线上；你在时间线上微调、一键质检、导出。
 
-仓库：https://github.com/Kr1nous/videocut  
-安装包：见 [Releases](https://github.com/Kr1nous/videocut/releases) 里的 [`CutStudio_1.3.0_aarch64.dmg`](https://github.com/Kr1nous/videocut/releases/download/v1.3.0/CutStudio_1.3.0_aarch64.dmg)（Apple Silicon）。安装后应用名叫「剪辑台」。
+**An AI video editor for macOS.** Drop in your footage, start Claude Code / Codex / Gemini CLI in the built-in terminal (or connect any MCP client), and describe the cut you want. CutStudio gives the agent about 90 editing tools — local Whisper transcription, text-based cutting, jump cuts, filler-word and retake removal, auto captions, B-roll, music ducking, EBU R128 loudness, reframing to 9:16 — and a real timeline for you to review and fine-tune.
+
+[![Release](https://img.shields.io/github/v/release/Kr1nous/cutstudio)](https://github.com/Kr1nous/cutstudio/releases/latest) ![macOS Apple Silicon](https://img.shields.io/badge/macOS-Apple%20Silicon-black) ![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB)
+
+**下载**：[CutStudio_1.3.0_aarch64.dmg](https://github.com/Kr1nous/cutstudio/releases/download/v1.3.0/CutStudio_1.3.0_aarch64.dmg)（Apple Silicon，[所有版本](https://github.com/Kr1nous/cutstudio/releases)）。安装后应用名叫「剪辑台」。
+
+## 能做什么
+
+- **AI 接管剪辑**：Claude Code、Codex、Grok、Gemini CLI 在内置终端里一键启动，自动读到剪辑说明；也可以通过 MCP（`http://127.0.0.1:4877/mcp`）接入 Cursor、Claude Desktop 等客户端。
+- **听懂内容**：本地 whisper.cpp 逐词转写，音频不出电脑；静音、停顿、镜头、响度、节拍自动分析。
+- **按文稿剪**：删句子、去重录（NG）、去口头禅、压缩停顿，字幕自动跟着重建。
+- **口播 / 短视频常用手法**：跳剪放大、B-roll 按台词插入、J/L cut、Ken Burns、变速、切点对齐鼓点、竖屏自动跟随人物。
+- **字幕与包装**：按语义断句的字幕，描边 / 底框 / 卡拉 OK / 关键词高亮样式，片头、章节卡、片尾模板。
+- **声音**：按 LUFS 统一响度、人声增强、降噪、背景音乐自动定音量并在说话时闪避。
+- **人来把关**：精简的界面，`⌘K` 搜全部命令；时间线可缩放、吸附、拖动；每一步 AI 改动都可查看和撤销；一键质检；导出支持区间、SRT、ProRes、透明 MOV。
+
+适合：口播 / 知识类视频、播客剪辑、Vlog、访谈、产品介绍、抖音 / 小红书 / YouTube Shorts 竖屏短视频。
 
 ## 运行
 
@@ -11,7 +26,7 @@ macOS 桌面剪辑软件（Tauri 2）。面向已经录制好的影片：人在�
 
 ```bash
 export PATH="$HOME/homebrew/bin:$HOME/.cargo/bin:$PATH"
-cd ~/cut-studio   # 或克隆后的 videocut 目录
+git clone https://github.com/Kr1nous/cutstudio.git && cd cutstudio
 npm install --cache ./.npm-cache
 npm run dev       # Tauri 桌面窗口
 ```
